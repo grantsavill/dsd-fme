@@ -105,6 +105,7 @@ Decoder options:
   -fe             Decode only EDACS EA/ProVoice*
   -fE             Decode only EDACS EA/ProVoice with ESK 0xA0*
   -fm             Decode only dPMR*
+  -fT             Decode only TETRA*
   -l            Disable DMR, dPMR, NXDN, M17 input filtering
   -xx           Expect non-inverted X2-TDMA signal
   -xr           Expect inverted DMR signal

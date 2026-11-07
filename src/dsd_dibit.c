@@ -293,7 +293,7 @@ int digitize (dsd_opts* opts, dsd_state* state, int symbol)
           (state->synctype == 9)  || (state->synctype == 11) || (state->synctype == 13) ||
           (state->synctype == 17) || (state->synctype == 29) || (state->synctype == 31) ||
           (state->synctype == 77) || (state->synctype == 87) ||(state->synctype == 36) ||
-          (state->synctype == 99)                              )
+          (state->synctype == 99) || (state->synctype == 42)   )
 
     {
       //  1 -P25p1

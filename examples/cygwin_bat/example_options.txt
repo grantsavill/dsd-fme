@@ -35,6 +35,11 @@ Trunking Option Examples:
   -fE -i tcp:192.168.7.5:7355 -U 4532 -T -C edacs_channel_map.csv -G group.csv -N
   -fE -i rtl:0:850M:44:-2:24 -T -C edacs_channel_map.csv -G group.csv -N
 
+  TETRA Control/Traffic Channel Decoding with RTL or SDR++ TCP input,
+  ncurses terminal, payload dump to console
+  -fT -i rtl:0:390.6375M:0:-2:24 -N -Z
+  -fT -i tcp:127.0.0.1:7355 -N -Z
+
 Scanning Option Examples:
 
   Scanning will not perform quickly like a real scanner, but can be used with any

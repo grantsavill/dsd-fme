@@ -28,11 +28,17 @@ getSymbol (dsd_opts * opts, dsd_state * state, int have_sync)
   count = 0;
   sample = 0; //init sample with a value of 0...see if this was causing issues with raw audio monitoring
 
+  if (opts->frame_tetra == 1 && opts->audio_in_type != 4 && opts->audio_in_type != 44)
+  {
+    state->samplesPerSymbol = tetra_prepare_symbol_steps(opts, state);
+    state->symbolCenter = 0;
+  }
+
   for (i = 0; i < state->samplesPerSymbol; i++) //right HERE
     {
 
       // timing control
-      if ((i == 0) && (have_sync == 0))
+      if ((i == 0) && (have_sync == 0) && (opts->frame_tetra == 0))
         {
           if (state->samplesPerSymbol == 20)
             {
@@ -412,11 +418,11 @@ getSymbol (dsd_opts * opts, dsd_state * state, int have_sync)
             }
         }
 
-      if ((sample > state->max) && (have_sync == 1) && (state->rf_mod == 0))
+      if ((sample > state->max) && (have_sync == 1) && (state->rf_mod == 0) && (opts->frame_tetra == 0))
         {
           sample = state->max;
         }
-      else if ((sample < state->min) && (have_sync == 1) && (state->rf_mod == 0))
+      else if ((sample < state->min) && (have_sync == 1) && (state->rf_mod == 0) && (opts->frame_tetra == 0))
         {
           sample = state->min;
         }
@@ -497,7 +503,15 @@ getSymbol (dsd_opts * opts, dsd_state * state, int have_sync)
               count++;
             }
         }
-      if (state->samplesPerSymbol == 5) //provoice or gfsk
+      if (opts->frame_tetra == 1 || state->samplesPerSymbol < 5)
+        {
+          if (i == state->symbolCenter)
+            {
+              sum += sample;
+              count++;
+            }
+        }
+      else if (state->samplesPerSymbol == 5) //provoice or gfsk
         {
           if (i == 2)
             {
@@ -589,11 +603,22 @@ getSymbol (dsd_opts * opts, dsd_state * state, int have_sync)
         }
 
 
+      if (opts->frame_tetra == 1 && opts->audio_in_type != 4 && opts->audio_in_type != 44)
+        {
+          tetra_push_audio_sample(opts, state, sample);
+        }
       state->lastsample = sample;
 
     }
 
-  symbol = (sum / count);
+  if (opts->frame_tetra == 1 && opts->audio_in_type != 4 && opts->audio_in_type != 44)
+    {
+      symbol = tetra_finish_symbol(opts, state);
+    }
+  else
+    {
+      symbol = (sum / count);
+    }
 
   if ((opts->symboltiming == 1) && (have_sync == 0) && (state->lastsynctype != -1))
     {
@@ -637,9 +662,17 @@ getSymbol (dsd_opts * opts, dsd_state * state, int have_sync)
       return(-1);
     }
 
-    state->symbolc = fgetc(opts->symbolfile);
+    if (opts->frame_tetra == 1 && state->tetra_sym_count < state->tetra_bin_write_count)
+    {
+      state->symbolc = state->tetra_sym_ring[state->tetra_sym_count & 1023];
+    }
+    else
+    {
+      state->symbolc = fgetc(opts->symbolfile);
+    }
 
     //fprintf(stderr, "%d", state->symbolc);
+    if (opts->frame_tetra == 0 || state->tetra_sym_count >= state->tetra_bin_write_count)
     if( feof(opts->symbolfile) )
     {
       // opts->audio_in_type = 0; //switch to pulse after playback, ncurses terminal can initiate replay if wanted
@@ -710,6 +743,15 @@ getSymbol (dsd_opts * opts, dsd_state * state, int have_sync)
     symbol = (int)float_symbol * (int)10000;
   }
 
+  if (opts->frame_tetra == 1 && (opts->audio_in_type == 4 || opts->audio_in_type == 44))
+  {
+    if (state->tetra_sym_count >= state->tetra_bin_write_count)
+    {
+      state->tetra_sym_ring[state->tetra_bin_write_count & 1023] = (opts->audio_in_type == 4) ? state->symbolc : symbol;
+      state->tetra_bin_write_count++;
+    }
+    state->tetra_sym_count++;
+  }
   state->symbolcnt++;
   return (symbol);
 }

@@ -444,6 +444,16 @@ void watchdog_event_current (dsd_opts * opts, dsd_state * state, uint8_t slot)
       sprintf (tgt_str, "%s", state->m17_dst_csd);
     }
 
+    if (state->lastsynctype == 41 || state->lastsynctype == 42) //TETRA
+    {
+      sys_id1 = state->tetra_mcc;
+      sys_id2 = state->tetra_mnc;
+      sys_id3 = state->tetra_colour_code;
+      enc = state->tetra_enc;
+      alg_id = state->tetra_enc_alg;
+      sprintf (sysid_string, "TETRA_%03u_%04u_CC_%02u", sys_id1, sys_id2, sys_id3);
+    }
+
     if (state->lastsynctype == 6 || state->lastsynctype == 7 || state->lastsynctype == 18 || state->lastsynctype == 19) //DSTAR
     {
       source_id = 0;

@@ -19,6 +19,7 @@
 -fx X2-TDMA
 -fy YSF
 -fz M17 Stream
+-fT TETRA
 ```
 
 ## Conventional Frequency Scanner
@@ -162,6 +163,18 @@ NXDN Type-D/IDAS Update: Type-D or IDAS decoding/trunking has been coded now and
 Channel Map and Group CSV Note: Leave the top line of the channel_map.csv and group.csv as the label, do not delete the line, if no line is there, dsd_import skips the first line so it will not import the first channel or first group in those files if there is something there that isn't a label. Channel map CSV files (`-C`) also support an optional 3rd column (`channel,frequency,access_code`) to specify a per-channel DMR Color Code (`0-15` decimal), NXDN RAN (`0-63` decimal), or P25 NAC (`000-FFF` hex) that is automatically applied whenever DSD-FME tunes to that channel during trunking or `-Y` scanning.
 
 Hytera XPT: Code has been added for XPT system slco/flco/csbk decoding and trunking. The setup will be similar to Capacity Plus trunking in the csv file, listing each LSN channel to a frequency (see examples/hytera_xpt_chan.csv). Currently, this set up is working with smaller XPT systems that I have been able to test with.
+
+## TETRA (Data Only) ##
+
+TETRA control and traffic channel signalling (Data Only, no voice) can be decoded with the `-fT` switch (`pi/4-DQPSK`, 18000 sym/s, 25 kHz bandwidth). It decodes `SYNC`/`SYSINFO` (`MCC`, `MNC`, `LA`, `CC`), encryption state (`Clear (Unencrypted)` or `Encrypted (TEA1/TEA2/TEA3/TEA4)`), `Carrier` and `Main Carrier` frequencies, `D-NWRK-BROADCAST` `Cell Neighbours`, and MAC/LLC/MLE/CMCE/MM/SDS PDUs.
+
+--TETRA with RTL-SDR input (use 24 kHz bandwidth):
+
+`dsd-fme -fT -i rtl:0:390.6375M:26:-2:24 -N 2> log.ans`
+
+--TETRA with SDR++ TCP Direct Audio Link (set VFO bandwidth to ~25 kHz):
+
+`dsd-fme -fT -i tcp -N 2> log.ans`
 
 ## NCurses Keyboard Shortcuts ##
 

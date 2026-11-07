@@ -8,6 +8,73 @@
 
 #include "dsd.h"
 
+void dsd_toggle_signal_inversion(dsd_opts * opts)
+{
+  if (opts->inverted_dmr == 0)
+  {
+    opts->inverted_dmr = 1;
+    opts->inverted_dpmr = 1;
+    opts->inverted_x2tdma = 1;
+    opts->inverted_ysf = 1;
+    opts->inverted_nxdn = 1;
+    opts->inverted_tetra = 1;
+  }
+  else
+  {
+    opts->inverted_dmr = 0;
+    opts->inverted_dpmr = 0;
+    opts->inverted_x2tdma = 0;
+    opts->inverted_ysf = 0;
+    opts->inverted_nxdn = 0;
+    opts->inverted_tetra = 0;
+  }
+}
+
+void dsd_toggle_encrypted_mute(dsd_opts * opts)
+{
+  if (opts->unmute_encrypted_p25 == 0 && opts->dmr_mute_encL == 1 && opts->reverse_mute == 0)
+  {
+    opts->unmute_encrypted_p25 = 1;
+    opts->dmr_mute_encL = 0;
+    opts->dmr_mute_encR = 0;
+    opts->reverse_mute = 1;
+  }
+  else
+  {
+    opts->unmute_encrypted_p25 = 0;
+    opts->dmr_mute_encL = 1;
+    opts->dmr_mute_encR = 1;
+    opts->reverse_mute = 0;
+  }
+}
+
+static int *dsd_get_active_cc_filter(dsd_opts * opts, dsd_state * state, int * max_val, int * cur_val)
+{
+  int lls = state->lastsynctype;
+  if (lls == 41 || lls == 42 || lls == 43 || opts->frame_tetra == 1)
+  {
+    *max_val = 63;
+    *cur_val = (state->tetra_scramb_valid && state->tetra_colour_code <= 63) ? (int)state->tetra_colour_code : -1;
+    return &opts->tetra_cc_filter;
+  }
+  if (lls == 28 || lls == 29 || ((opts->frame_nxdn48 == 1 || opts->frame_nxdn96 == 1) && opts->frame_dmr == 0 && opts->frame_p25p1 == 0 && opts->frame_p25p2 == 0))
+  {
+    *max_val = 63;
+    *cur_val = (state->nxdn_last_ran >= 0 && state->nxdn_last_ran <= 63) ? state->nxdn_last_ran : -1;
+    return &opts->nxdn_ran_filter;
+  }
+  if (lls == 0 || lls == 1 || lls == 35 || lls == 36 || ((opts->frame_p25p1 == 1 || opts->frame_p25p2 == 1) && opts->frame_dmr == 0))
+  {
+    int nac = (lls == 35 || lls == 36 || state->nac == 0) ? state->p2_cc : state->nac;
+    *max_val = 0xFFF;
+    *cur_val = (nac >= 0 && nac <= 0xFFF) ? nac : -1;
+    return &opts->p25_nac_filter;
+  }
+  *max_val = 15;
+  *cur_val = (state->dmr_color_code <= 15) ? (int)state->dmr_color_code : -1;
+  return &opts->dmr_cc_filter;
+}
+
 uint8_t ncurses_input_handler(dsd_opts * opts, dsd_state * state, int c)
 {
 
@@ -57,82 +124,30 @@ uint8_t ncurses_input_handler(dsd_opts * opts, dsd_state * state, int c)
     else { state->tg_hold = 0; if (opts->audio_out_type != 5) opts->slot_preference = 2; }
   }
 
-  if (c == 48) //'0' key, toggle DMR Color Code / NXDN RAN / P25 NAC filter on current value or clear
+  if (c == 48 || c == 46 || c == 44) //'0', '.', ',' keys: toggle or cycle active access code filter
   {
-    int lls = state->lastsynctype;
-    if (lls == 28 || lls == 29 || ((opts->frame_nxdn48 == 1 || opts->frame_nxdn96 == 1) && opts->frame_dmr == 0 && opts->frame_p25p1 == 0 && opts->frame_p25p2 == 0))
+    int max_val = 15, cur_val = -1;
+    int *flt = dsd_get_active_cc_filter(opts, state, &max_val, &cur_val);
+    if (c == 48) //'0' key: lock on current value or clear
     {
-      if (opts->nxdn_ran_filter == -1)
+      if (*flt == -1)
       {
-        if (state->nxdn_last_ran >= 0 && state->nxdn_last_ran <= 63)
-          opts->nxdn_ran_filter = state->nxdn_last_ran;
+        if (cur_val >= 0 && cur_val <= max_val)
+          *flt = cur_val;
       }
-      else opts->nxdn_ran_filter = -1;
+      else *flt = -1;
     }
-    else if (lls == 0 || lls == 1 || lls == 35 || lls == 36 || ((opts->frame_p25p1 == 1 || opts->frame_p25p2 == 1) && opts->frame_dmr == 0))
+    else if (c == 46) //'.' key: cycle forward (-1 -> 0..max -> -1)
     {
-      if (opts->p25_nac_filter == -1)
-      {
-        int nac = (lls == 35 || lls == 36 || state->nac == 0) ? state->p2_cc : state->nac;
-        if (nac >= 0 && nac <= 0xFFF)
-          opts->p25_nac_filter = nac;
-      }
-      else opts->p25_nac_filter = -1;
+      if (*flt < max_val)
+        (*flt)++;
+      else *flt = -1;
     }
-    else
+    else //',' key: cycle backward (-1 -> max..0 -> -1)
     {
-      if (opts->dmr_cc_filter == -1)
-      {
-        if (state->dmr_color_code <= 15)
-          opts->dmr_cc_filter = state->dmr_color_code;
-      }
-      else opts->dmr_cc_filter = -1;
-    }
-  }
-
-  if (c == 46) //'.' key, cycle DMR Color Code / NXDN RAN / P25 NAC filter forward (-1 -> 0..max -> -1)
-  {
-    int lls = state->lastsynctype;
-    if (lls == 28 || lls == 29 || ((opts->frame_nxdn48 == 1 || opts->frame_nxdn96 == 1) && opts->frame_dmr == 0 && opts->frame_p25p1 == 0 && opts->frame_p25p2 == 0))
-    {
-      if (opts->nxdn_ran_filter < 63)
-        opts->nxdn_ran_filter++;
-      else opts->nxdn_ran_filter = -1;
-    }
-    else if (lls == 0 || lls == 1 || lls == 35 || lls == 36 || ((opts->frame_p25p1 == 1 || opts->frame_p25p2 == 1) && opts->frame_dmr == 0))
-    {
-      if (opts->p25_nac_filter < 0xFFF)
-        opts->p25_nac_filter++;
-      else opts->p25_nac_filter = -1;
-    }
-    else
-    {
-      if (opts->dmr_cc_filter < 15)
-        opts->dmr_cc_filter++;
-      else opts->dmr_cc_filter = -1;
-    }
-  }
-
-  if (c == 44) //',' key, cycle DMR Color Code / NXDN RAN / P25 NAC filter backward (-1 -> max..0 -> -1)
-  {
-    int lls = state->lastsynctype;
-    if (lls == 28 || lls == 29 || ((opts->frame_nxdn48 == 1 || opts->frame_nxdn96 == 1) && opts->frame_dmr == 0 && opts->frame_p25p1 == 0 && opts->frame_p25p2 == 0))
-    {
-      if (opts->nxdn_ran_filter == -1)
-        opts->nxdn_ran_filter = 63;
-      else opts->nxdn_ran_filter--;
-    }
-    else if (lls == 0 || lls == 1 || lls == 35 || lls == 36 || ((opts->frame_p25p1 == 1 || opts->frame_p25p2 == 1) && opts->frame_dmr == 0))
-    {
-      if (opts->p25_nac_filter == -1)
-        opts->p25_nac_filter = 0xFFF;
-      else opts->p25_nac_filter--;
-    }
-    else
-    {
-      if (opts->dmr_cc_filter == -1)
-        opts->dmr_cc_filter = 15;
-      else opts->dmr_cc_filter--;
+      if (*flt == -1)
+        *flt = max_val;
+      else (*flt)--;
     }
   }
 
@@ -303,26 +318,10 @@ uint8_t ncurses_input_handler(dsd_opts * opts, dsd_state * state, int c)
 
   if (c == 105) //'i' key, toggle signal inversion on inverted types
   {
-    //Set all signal for inversion or uninversion
-    if (opts->inverted_dmr == 0)
-    {
-      opts->inverted_dmr = 1;
-      opts->inverted_dpmr = 1;
-      opts->inverted_x2tdma = 1;
-      opts->inverted_ysf = 1;
-      opts->inverted_nxdn = 1;
-    }
-    else
-    {
-      opts->inverted_dmr = 0;
-      opts->inverted_dpmr = 0;
-      opts->inverted_x2tdma = 0;
-      opts->inverted_ysf = 0;
-      opts->inverted_nxdn = 0;
-    }
+    dsd_toggle_signal_inversion(opts);
   }
 
-  if (c == 109) //'m' key, toggle qpsk/c4fm - everything but phase 2
+  if (c == 109 && opts->frame_tetra == 0) //'m' key, toggle qpsk/c4fm - everything but phase 2
   {
     if (state->rf_mod == 0)
     {
@@ -344,7 +343,7 @@ uint8_t ncurses_input_handler(dsd_opts * opts, dsd_state * state, int c)
     }
   }
 
-  if (c == 77) //'M' key, toggle qpsk - phase 2 6000 sps
+  if (c == 77 && opts->frame_tetra == 0) //'M' key, toggle qpsk - phase 2 6000 sps
   {
     if (state->rf_mod == 0)
     {
@@ -668,10 +667,15 @@ uint8_t ncurses_input_handler(dsd_opts * opts, dsd_state * state, int c)
     else opts->trunk_tune_data_calls = 1;
   }
 
-  if (opts->p25_trunk == 1 && c == 101) //'e' key, toggle tune enc calls (P25 only on certain grants)
+  if (opts->p25_trunk == 1 && opts->frame_tetra == 0 && c == 101) //'e' key, toggle tune enc calls (P25 only on certain grants)
   {
     if (opts->trunk_tune_enc_calls == 1) opts->trunk_tune_enc_calls = 0;
     else opts->trunk_tune_enc_calls = 1;
+  }
+
+  if (c == 69 || ((opts->p25_trunk == 0 || opts->frame_tetra == 1) && c == 101)) //'E' key (or 'e' when not trunking), toggle muting encrypted traffic
+  {
+    dsd_toggle_encrypted_mute(opts);
   }
 
   if (opts->p25_trunk == 1 && c == 84) //'T' key, toggle tune group calls
@@ -714,6 +718,9 @@ uint8_t ncurses_input_handler(dsd_opts * opts, dsd_state * state, int c)
     state->nxdn_base_freq = 0;
     state->nxdn_step = 0;
     state->nxdn_bw = 0;
+
+    //reset TETRA site/cell and slot info
+    tetra_reset_state(state);
 
   }
 

@@ -79,6 +79,13 @@ processFrame (dsd_opts * opts, dsd_state * state)
     }
 
   //NXDN FSW
+  if ((state->synctype == 41) || (state->synctype == 42))
+  {
+    sprintf (state->fsubtype, " DATA         ");
+    processTetra (opts, state);
+    return;
+  }
+
   if ((state->synctype == 28) || (state->synctype == 29))
   {
     //MBEout restored, is not handled internally by nxdn_frame.c

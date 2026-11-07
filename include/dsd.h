@@ -417,6 +417,8 @@ typedef struct
   short int aggressive_framesync;
 
   int frame_m17;
+  int frame_tetra;
+  int inverted_tetra;
 
   FILE *symbolfile;
   int call_alert;
@@ -478,6 +480,9 @@ typedef struct
 
   //P25 NAC Filter (-1 = disabled / allow all 0x000-0xFFF; 0..0xFFF = only allow matching NAC)
   int p25_nac_filter;
+
+  //TETRA Colour Code Filter (-1 = disabled / allow all 0-63; 0..63 = only allow matching CC)
+  int tetra_cc_filter;
 
   //Trunking - Use Group List as Allow List
   uint8_t trunk_use_allow_list;
@@ -1035,6 +1040,91 @@ typedef struct
   uint8_t static_ks_bits[2][882];
   int static_ks_counter[2];
 
+  //TETRA Data-Only Mode state
+  uint8_t tetra_sps_phase;
+  uint8_t tetra_burst_type;
+  uint16_t tetra_mcc;
+  uint16_t tetra_mnc;
+  uint8_t tetra_colour_code;
+  uint32_t tetra_scramb_init;
+  uint8_t tetra_scramb_valid;
+  uint8_t tetra_dl_usage;
+  uint8_t tetra_ul_usage;
+  uint8_t tetra_slot;
+  uint8_t tetra_frame;
+  uint8_t tetra_multiframe;
+  uint16_t tetra_hyperframe;
+  uint16_t tetra_la;
+  uint16_t tetra_main_carrier;
+  uint8_t tetra_freq_band;
+  uint8_t tetra_offset_idx;
+  uint8_t tetra_duplex_spacing;
+  double tetra_dl_freq_mhz;
+  uint32_t tetra_last_tg;
+  uint32_t tetra_last_src;
+  uint16_t tetra_call_id;
+  uint16_t tetra_carrier;
+  uint8_t tetra_ts_mask;
+  uint8_t tetra_enc;
+  uint8_t tetra_enc_alg;
+  uint8_t tetra_aie_enc;
+  uint8_t tetra_sec_class;
+  uint8_t tetra_nc_count;
+  uint16_t tetra_nc_carriers[16];
+  double tetra_nc_freqs[16];
+  uint32_t tetra_ev_ssi_cache[16];
+  time_t tetra_ev_time_cache[16];
+  uint8_t tetra_ev_cache_idx;
+  uint16_t tetra_status_code;
+  char tetra_call_type[64];
+  char tetra_pdu_str[128];
+  char tetra_sds_str[256];
+  char tetra_lip_str[256];
+  char tetra_country_str[64];
+  uint8_t tetra_mac_frag_buf[4096];
+  uint16_t tetra_mac_frag_len;
+  uint8_t tetra_mac_frag_active;
+  uint8_t tetra_mac_frag_enc;
+  uint32_t tetra_mac_frag_ssi;
+  int16_t tetra_raw_hist[4];
+  int16_t tetra_sub_buf[8192];
+  uint32_t tetra_sub_write_idx;
+  uint32_t tetra_sub_read_idx;
+  uint32_t tetra_prev_sub_read_idx;
+  uint32_t tetra_sync_sub_idx;
+  uint32_t tetra_last_sync_sub;
+  int32_t tetra_sym_ring[1024];
+  uint32_t tetra_sym_count;
+  uint32_t tetra_bin_write_count;
+  uint32_t tetra_sync_sym_count;
+  uint32_t tetra_last_sync_sym;
+  uint8_t tetra_tdma_locked;
+  uint8_t tetra_bit_swap;
+  float tetra_center;
+  float tetra_step_level;
+  uint8_t tetra_bsch_tn;
+  uint8_t tetra_bsch_fn;
+  uint8_t tetra_bsch_mn;
+  int16_t tetra_cod_batch[6 * 690];
+  uint8_t tetra_cod_batch_count;
+  int16_t tetra_serial_hist[20 * 138];
+  uint8_t tetra_serial_hist_frames;
+  time_t tetra_last_voice_time;
+  uint8_t tetra_voice_slot;
+  uint8_t tetra_voice_usage;
+  uint32_t tetra_voice_last_sym;
+  uint8_t tetra_ts_usage[4];
+  uint32_t tetra_ts_tg[4];
+  uint32_t tetra_ts_src[4];
+  uint16_t tetra_ts_call_id[4];
+  char tetra_ts_type[4][64];
+  uint32_t tetra_ts_last_sym[4];
+  uint8_t tetra_ts_cand_usage[4];
+  uint8_t tetra_ts_cand_count[4];
+  uint32_t tetra_ts_cand_sym[4];
+  uint8_t tetra_ts_idle_count[4];
+  uint8_t tetra_ts_logged[4];
+  uint32_t tetra_usage_ssi[64];
 } dsd_state;
 
 /*
@@ -1140,6 +1230,8 @@ typedef struct
  */
 
 void processdPMRvoice (dsd_opts * opts, dsd_state * state);
+void processTetra (dsd_opts * opts, dsd_state * state);
+int tetra_check_sync (dsd_opts * opts, dsd_state * state);
 void processAudio (dsd_opts * opts, dsd_state * state);
 void processAudioR (dsd_opts * opts, dsd_state * state);
 void openPulseInput (dsd_opts * opts);
@@ -1269,6 +1361,16 @@ void processM17STR(dsd_opts * opts, dsd_state * state); //M17 (STR)
 void processP2(dsd_opts * opts, dsd_state * state); //P2
 void processTSBK(dsd_opts * opts, dsd_state * state); //P25 Trunking Single Block
 void processMPDU(dsd_opts * opts, dsd_state * state); //P25 Multi Block PDU (SAP 0x61 FMT 0x15 or 0x17 for Trunking Blocks)
+int tetra_prepare_symbol_steps(dsd_opts * opts, dsd_state * state);
+void tetra_push_audio_sample(dsd_opts * opts, dsd_state * state, short sample);
+int tetra_finish_symbol(dsd_opts * opts, dsd_state * state);
+int tetra_check_sync(dsd_opts * opts, dsd_state * state);
+void processTetra(dsd_opts * opts, dsd_state * state);
+void tetra_flush_voice_batch(dsd_opts * opts, dsd_state * state);
+void tetra_clear_cell_state(dsd_state * state);
+void tetra_reset_state(dsd_state * state);
+const char *tetra_get_tea_name(const dsd_state *state, int is_encrypted);
+int tetra_voice_codec_available(void);
 short dmr_filter(short sample);
 short nxdn_filter(short sample);
 short dpmr_filter(short sample);
@@ -1289,6 +1391,8 @@ void ncursesOpen (dsd_opts * opts, dsd_state * state);
 void ncursesPrinter (dsd_opts * opts, dsd_state * state);
 void ncursesMenu (dsd_opts * opts, dsd_state * state);
 uint8_t ncurses_input_handler(dsd_opts * opts, dsd_state * state, int c);
+void dsd_toggle_signal_inversion(dsd_opts * opts);
+void dsd_toggle_encrypted_mute(dsd_opts * opts);
 void ncursesClose ();
 
 //NXDN Functions Start Here

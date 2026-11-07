@@ -199,6 +199,10 @@ getFrameSync (dsd_opts * opts, dsd_state * state)
   {
     t_max = 12; //based on Frame_Sync_2 pattern
   }
+  else if (opts->frame_tetra == 1)
+  {
+    t_max = 11;
+  }
   else if (opts->frame_m17 == 1)
   {
     t_max = 8;
@@ -243,7 +247,7 @@ getFrameSync (dsd_opts * opts, dsd_state * state)
   state->numflips = 0;
 
   //run here as well
-  if (opts->use_ncurses_terminal == 1)
+  if (opts->use_ncurses_terminal == 1 && (opts->frame_tetra == 0 || (state->tetra_sym_count & 3) == 0))
     ncursesPrinter(opts, state);
 
   //slot 1
@@ -266,7 +270,7 @@ getFrameSync (dsd_opts * opts, dsd_state * state)
 
       //run ncurses printer more frequently when no sync to speed up responsiveness of it during no sync period
       //NOTE: Need to monitor and test this, if responsiveness issues arise, then disable this
-      if ( opts->use_ncurses_terminal == 1 && ((t % 300) == 0)) //t maxes out at 1800 (6 times each getFrameSync)
+      if ( opts->use_ncurses_terminal == 1 && ((t % (opts->frame_tetra ? 1500 : 300)) == 0)) //t maxes out at 1800 (6 times each getFrameSync)
         ncursesPrinter(opts, state);
 
       symbol = getSymbol (opts, state, 0);
@@ -359,10 +363,19 @@ getFrameSync (dsd_opts * opts, dsd_state * state)
 
       if (state->dmr_payload_p > state->dmr_payload_buf + 900000)
       {
+       memcpy(state->dmr_payload_buf, state->dmr_payload_p - 200, 200 * sizeof(int));
        state->dmr_payload_p = state->dmr_payload_buf + 200;
       }
 
-      if (1 == 1)
+      if (opts->audio_in_type == 4)
+      {
+        *state->dmr_payload_p = state->symbolc;
+      }
+      else if (opts->frame_tetra == 1)
+      {
+        *state->dmr_payload_p = symbol;
+      }
+      else if (1 == 1)
       {
         if (symbol > state->center)
         {
@@ -452,6 +465,8 @@ getFrameSync (dsd_opts * opts, dsd_state * state)
                 }
               state->max = lsum / opts->msize;
               state->center = ((state->max) + (state->min)) / 2;
+              state->umid = (((state->max) - state->center) * 5 / 8) + state->center;
+              state->lmid = (((state->min) - state->center) * 5 / 8) + state->center;
               state->maxref = (int)((state->max) * 0.80F);
               state->minref = (int)((state->min) * 0.80F);
             }
@@ -468,6 +483,19 @@ getFrameSync (dsd_opts * opts, dsd_state * state)
             if (opts->frame_nxdn48 == 1 || opts->frame_nxdn96 == 1 || opts->frame_dpmr == 1 || opts->frame_m17 == 1)
             {
               goto SYNC_TEST_END;
+            }
+          }
+
+          if (opts->frame_tetra == 1)
+          {
+            int tetra_st = tetra_check_sync(opts, state);
+            if (tetra_st != -1)
+            {
+              state->offset = synctest_pos;
+              sprintf(state->ftype, "TETRA");
+              state->synctype = tetra_st;
+              state->lastsynctype = tetra_st;
+              return (tetra_st);
             }
           }
 
@@ -1435,7 +1463,7 @@ getFrameSync (dsd_opts * opts, dsd_state * state)
       if (state->lastsynctype != 1)
         {
 
-          if (synctest_pos >= 1800)
+          if (synctest_pos >= (opts->frame_tetra ? 4500 : 1800))
             {
               if ((opts->errorbars == 1) && (opts->verbose > 1) && (state->carrier == 1))
                 {

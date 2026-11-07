@@ -303,7 +303,7 @@ void openOSSOutput (dsd_opts * opts)
       //TODO: Multiple output returns based on 8k/1, 8k/2, or maybe 48k/1? (2,3,5)??
       if (opts->pulse_digi_out_channels == 2)
         opts->audio_out_type = 2; //2 for 2 channel 8k OSS 16-bit short output
-      else if (opts->frame_m17 == 1)
+      else if (opts->frame_m17 == 1 || opts->frame_tetra == 1)
         opts->audio_out_type = 2;
       else opts->audio_out_type = 5;
 

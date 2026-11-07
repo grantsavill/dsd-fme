@@ -42,7 +42,9 @@ static const char * SyncTypes[44] = {
   "EDACS/PV", //37
   "EDACS/PV", //38
   "ANALOG", //39 Generic Sync Types
-  "DIGITAL" //40 Generic Sync Types
+  "DIGITAL", //40 Generic Sync Types
+  "TETRA", //41 +TETRA
+  "TETRA" //42 -TETRA
 };
 
 #endif

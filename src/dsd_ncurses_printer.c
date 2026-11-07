@@ -545,6 +545,12 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
   {
     filter_mismatch = 1;
   }
+  if (opts->tetra_cc_filter >= 0 && opts->tetra_cc_filter <= 63 &&
+      (lls == 41 || lls == 42 || lls == 43 || opts->frame_tetra == 1) &&
+      state->tetra_scramb_valid && (int)state->tetra_colour_code != opts->tetra_cc_filter)
+  {
+    filter_mismatch = 1;
+  }
   int carrier_color = (state->carrier == 1 && !filter_mismatch) ? 3 : 6;
 
   if (state->carrier == 1)
@@ -562,19 +568,22 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
   if (opts->mod_qpsk == 1) printw ("[QPSK]");
   if (opts->mod_c4fm == 1) printw ("[C4FM]");
   if (opts->mod_gfsk == 1) printw ("[GFSK]");
-  printw ( "[%d] \n", (48000*opts->wav_interpolator)/state->samplesPerSymbol);
-  printw ("| Decoding:    [%s] ", opts->output_name);
-  if (opts->aggressive_framesync == 0) printw ("CRC/(RAS) ");
-  if (opts->dmr_cc_filter >= 0 && opts->dmr_cc_filter <= 15 && opts->frame_dmr == 1) printw ("[DCC Filter: %02d] ", opts->dmr_cc_filter);
-  if (opts->nxdn_ran_filter >= 0 && opts->nxdn_ran_filter <= 63 && (opts->frame_nxdn48 == 1 || opts->frame_nxdn96 == 1)) printw ("[RAN Filter: %02d] ", opts->nxdn_ran_filter);
-  if (opts->p25_nac_filter >= 0 && opts->p25_nac_filter <= 0xFFF && (opts->frame_p25p1 == 1 || opts->frame_p25p2 == 1)) printw ("[NAC Filter: %03X] ", opts->p25_nac_filter);
+  if (opts->frame_tetra == 1) printw ("[18000] \n");
+  else printw ( "[%d] \n", (48000*opts->wav_interpolator)/state->samplesPerSymbol);
+  printw ("| Decoding:    [%s]", opts->output_name);
+  if (opts->frame_tetra == 1) printw ("[%s]", tetra_voice_codec_available() ? "ACELP" : "Data Only");
+  if (opts->aggressive_framesync == 0) printw ("[CRC/(RAS)]");
+  if (opts->dmr_cc_filter >= 0 && opts->dmr_cc_filter <= 15 && opts->frame_dmr == 1) printw ("[DCC Filter: %02d]", opts->dmr_cc_filter);
+  if (opts->nxdn_ran_filter >= 0 && opts->nxdn_ran_filter <= 63 && (opts->frame_nxdn48 == 1 || opts->frame_nxdn96 == 1)) printw ("[RAN Filter: %02d]", opts->nxdn_ran_filter);
+  if (opts->p25_nac_filter >= 0 && opts->p25_nac_filter <= 0xFFF && (opts->frame_p25p1 == 1 || opts->frame_p25p2 == 1)) printw ("[NAC Filter: %03X]", opts->p25_nac_filter);
+  if (opts->tetra_cc_filter >= 0 && opts->tetra_cc_filter <= 63 && opts->frame_tetra == 1) printw ("[TCC Filter: %02d]", opts->tetra_cc_filter);
   //debug -- troubleshoot voice tuning after grant on DMR CC, subsequent grant may not tune because tuner isn't available
-  if (opts->p25_trunk == 1 && opts->p25_is_tuned == 1) printw ("Tuner Locked    ");
-  if (opts->p25_trunk == 1 && opts->p25_is_tuned == 0) printw ("Tuner Available ");
+  if (opts->p25_trunk == 1 && opts->p25_is_tuned == 1) printw ("[Tuner Locked]");
+  if (opts->p25_trunk == 1 && opts->p25_is_tuned == 0) printw ("[Tuner Available]");
   printw ("\n");
   printw ("| In Level:    [%02d%%] \n", level);
 
-  if (opts->dmr_stereo == 0)
+  if (opts->dmr_stereo == 0 && opts->frame_tetra == 0)
   {
     printw ("| Voice Error: [%X][%X]", state->errs&0xF, state->errs2&0xF);
     if (opts->slot1_on == 0) printw (" OFF");
@@ -582,7 +591,7 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
     printw ("\n");
   }
 
-  if (opts->dmr_stereo == 1)
+  if (opts->dmr_stereo == 1 && opts->frame_tetra == 0)
   {
     printw ("| Voice Error: [%X][%X] Slot 1 (1)", state->errs&0xF, state->errs2&0xF);
     if (opts->slot1_on == 0) printw (" OFF");
@@ -618,6 +627,77 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
     printw ("\n");
     printw ("| DATA: %s", state->dstar_gps);
     printw ("\n");
+  }
+
+  //TETRA (Data Only)
+  if ((lls == 41 || lls == 42 || lls == 43) && state->carrier == 1 && state->tetra_scramb_valid == 1 && !filter_mismatch)
+  {
+    int is_enc = (state->tetra_enc || state->tetra_aie_enc || state->tetra_sec_class >= 2) ? 1 : 0;
+    const char *tea_str = tetra_get_tea_name(state, is_enc);
+
+    if (is_enc)
+      printw ("| TETRA - MCC: %u; MNC: %u; LA: %u; CC: %02u; Encrypted (%s)\n",
+              state->tetra_mcc, state->tetra_mnc, state->tetra_la, state->tetra_colour_code, tea_str);
+    else
+      printw ("| TETRA - MCC: %u; MNC: %u; LA: %u; CC: %02u; Clear (Unencrypted)\n",
+              state->tetra_mcc, state->tetra_mnc, state->tetra_la, state->tetra_colour_code);
+    if (state->tetra_dl_freq_mhz > 0.0)
+      printw ("| Main Carrier: %.06lf MHz (%u)\n", state->tetra_dl_freq_mhz, state->tetra_main_carrier);
+    else
+      printw ("| Main Carrier: ---.------ MHz\n");
+    for (int s = 0; s < 4; s++)
+    {
+      uint8_t tn = (uint8_t)(s + 1);
+      if (state->tetra_ts_type[s][0] != '\0')
+      {
+        printw ("| TN %u: %s", tn, state->tetra_ts_type[s]);
+        if (state->tetra_ts_tg[s] != 0)
+          printw ("; TGT: %u", state->tetra_ts_tg[s]);
+        if (state->tetra_ts_src[s] != 0)
+          printw ("; SRC: %u", state->tetra_ts_src[s]);
+
+        if (state->tetra_ts_usage[s] > 3 && state->tetra_voice_slot != 0 && state->tetra_voice_slot != tn)
+          printw (" [Busy]");
+        printw ("\n");
+      }
+      else if (state->tetra_ts_usage[s] == 2)
+      {
+        printw ("| TN %u: Control (MCCH)\n", tn);
+      }
+      else if (state->tetra_ts_usage[s] == 1 || state->tetra_ts_usage[s] == 3)
+      {
+        printw ("| TN %u: Signalling (SCH)\n", tn);
+      }
+      else
+      {
+        printw ("| TN %u: Idle\n", tn);
+      }
+    }
+    if (state->tetra_sds_str[0] != 0)
+      printw ("| SDS: %s\n", state->tetra_sds_str);
+    if (state->tetra_lip_str[0] != 0)
+      printw ("| LIP: %s\n", state->tetra_lip_str);
+    if (state->tetra_nc_count > 0)
+    {
+      for (uint8_t i = 0; i < state->tetra_nc_count; i++)
+      {
+        if (i == 0)
+          printw ("| Cell Neighbours: ");
+        else if (i % 2 == 0)
+          printw ("\n|                  ");
+        else
+          printw ("; ");
+        if (state->tetra_nc_freqs[i] > 0.0)
+          printw ("%.06lf MHz (%u)", state->tetra_nc_freqs[i], state->tetra_nc_carriers[i]);
+        else
+          printw ("(%u)", state->tetra_nc_carriers[i]);
+      }
+      printw ("\n");
+    }
+    else
+    {
+      printw ("| Cell Neighbours: None\n");
+    }
   }
 
   //M17

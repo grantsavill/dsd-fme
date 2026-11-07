@@ -101,6 +101,12 @@
 
     //when no carrier sync, rotate the symbol out file every hour, if enabled
     rotate_symbol_out_file(opts, state); //this should handle any conventional system where no sync conditions occur when no activity
+    if (opts->frame_tetra == 1 && state->tetra_cod_batch_count > 0)
+    {
+      tetra_flush_voice_batch(opts, state);
+    }
+    state->tetra_voice_slot = 0;
+    state->tetra_voice_usage = 0;
  
    if (opts->floating_point == 1)
    {
@@ -270,7 +276,11 @@
    memset (state->dibit_buf, 0, sizeof (int) * 200);
    //dmr buffer
    state->dmr_payload_p = state->dmr_payload_buf + 200;
-   memset (state->dmr_payload_buf, 0, sizeof (int) * 200);
+   if (state->dmr_payload_p != NULL && state->dmr_payload_p > state->dmr_payload_buf + 200)
+     memcpy (state->dmr_payload_buf, state->dmr_payload_p - 200, sizeof (int) * 200);
+   else
+     memset (state->dmr_payload_buf, 0, sizeof (int) * 200);
+   state->dmr_payload_p = state->dmr_payload_buf + 200;
    memset (state->dmr_stereo_payload, 1, sizeof(int) * 144);
    //dmr buffer end
  
@@ -284,6 +294,11 @@
    state->max = 15000;
    state->min = -15000;
    state->center = 0;
+   if (state->umid == 0 && state->lmid == 0)
+   {
+     state->umid = 9375;
+     state->lmid = -9375;
+   }
    state->err_str[0] = 0;
    state->err_strR[0] = 0;
    sprintf (state->fsubtype, "              ");
@@ -604,6 +619,18 @@
    sprintf (state->m17_meta_string, "%s", "");
 
    state->m17_viterbi_err = 0.0f;
+
+   //TETRA state init (full-init on startup, or reset after >= 2 seconds of no carrier)
+   if (state->event_history_s == NULL || (time(NULL) - state->last_cc_sync_time) >= 2)
+   {
+     if (state->event_history_s == NULL)
+       state->tetra_sps_phase = 0;
+     tetra_reset_state(state);
+   }
+   state->tetra_mac_frag_len = 0;
+   state->tetra_mac_frag_active = 0;
+   state->tetra_mac_frag_enc = 0;
+   state->tetra_mac_frag_ssi = 0;
  
    //set float temp buffer to baseline
    memset (state->audio_out_temp_buf, 0.0f, sizeof(state->audio_out_temp_buf));
@@ -880,6 +907,9 @@
    opts->dmr_cc_filter = -1;
    opts->nxdn_ran_filter = -1;
    opts->p25_nac_filter = -1;
+   opts->tetra_cc_filter = -1;
+   opts->frame_tetra = 0;
+   opts->inverted_tetra = 0;
  
  } //initopts
  
@@ -896,7 +926,11 @@
    //dmr buffer -- double check this set up
    state->dmr_payload_buf = malloc (sizeof (int) * 1000000);
    state->dmr_payload_p = state->dmr_payload_buf + 200;
-   memset (state->dmr_payload_buf, 0, sizeof (int) * 200);
+   if (state->dmr_payload_p != NULL && state->dmr_payload_p > state->dmr_payload_buf + 200)
+     memcpy (state->dmr_payload_buf, state->dmr_payload_p - 200, sizeof (int) * 200);
+   else
+     memset (state->dmr_payload_buf, 0, sizeof (int) * 200);
+   state->dmr_payload_p = state->dmr_payload_buf + 200;
    memset (state->dmr_stereo_payload, 1, sizeof(int) * 144);
    //dmr buffer end
    state->repeat = 0;
@@ -950,6 +984,11 @@
    state->audio_out_temp_buf_pR = state->audio_out_temp_bufR;
    //state->wav_out_bytes = 0;
    state->center = 0;
+   if (state->umid == 0 && state->lmid == 0)
+   {
+     state->umid = 9375;
+     state->lmid = -9375;
+   }
    state->jitter = -1;
    state->synctype = -1;
    state->min = -15000;
@@ -1400,6 +1439,18 @@
    sprintf (state->m17_meta_string, "%s", "");
 
    state->m17_viterbi_err = 0.0f;
+
+   //TETRA state init (full-init on startup, or reset after >= 2 seconds of no carrier)
+   if (state->event_history_s == NULL || (time(NULL) - state->last_cc_sync_time) >= 2)
+   {
+     if (state->event_history_s == NULL)
+       state->tetra_sps_phase = 0;
+     tetra_reset_state(state);
+   }
+   state->tetra_mac_frag_len = 0;
+   state->tetra_mac_frag_active = 0;
+   state->tetra_mac_frag_enc = 0;
+   state->tetra_mac_frag_ssi = 0;
  
    #ifdef USE_CODEC2
    state->codec2_3200 = codec2_create(CODEC2_MODE_3200);
@@ -1554,6 +1605,7 @@
    printf ("  -fe             Decode only EDACS EA/ProVoice*\n");
    printf ("  -fE             Decode only EDACS EA/ProVoice with ESK 0xA0*\n");
    printf ("  -fm             Decode only dPMR*\n");
+   printf ("  -fT             Decode only TETRA*\n");
    printf ("  -l            Disable DMR, dPMR, NXDN, M17 input filtering\n");
   //  printf ("  -u <num>      Unvoiced speech quality (default=3)\n");
    printf ("  -xx           Expect non-inverted X2-TDMA signal\n");
@@ -1982,7 +2034,9 @@
    fprintf (stderr,"CODEC2 Support Enabled\n");
    #endif
  
-   initOpts (&opts);
+   memset (&opts, 0, sizeof(opts));
+  memset (&state, 0, sizeof(state));
+  initOpts (&opts);
    initState (&state);
    init_audio_filters(&state); //audio filters
    init_rrc_filter_memory(); //initialize input filtering
@@ -2281,6 +2335,9 @@
  
          case 'q': //New letter assignment for Reverse Mute, flow down to allow temp numbers
            opts.reverse_mute = 1;
+           opts.unmute_encrypted_p25 = 1;
+           opts.dmr_mute_encL = 0;
+           opts.dmr_mute_encR = 0;
            fprintf (stderr, "Reverse Mute\n");
            break;
  
@@ -3007,7 +3064,7 @@
              }
            }
            //change ft to only do P25 and DMR (TDMA trunking modes)
-           else if (optarg[0] == 't')
+           else if (optarg[0] == 't' && optarg[1] != 'e')
            {
              opts.frame_dstar = 0;
              opts.frame_x2tdma = 0;
@@ -3156,6 +3213,46 @@
  
              //disable RRC filter for now
              opts.use_cosine_filter = 0;
+           }
+           else if (optarg[0] == 'T' || strncmp(optarg, "tetra", 5) == 0)
+           {
+             opts.frame_dstar = 0;
+             opts.frame_x2tdma = 0;
+             opts.frame_p25p1 = 0;
+             opts.frame_p25p2 = 0;
+             opts.frame_nxdn48 = 0;
+             opts.frame_nxdn96 = 0;
+             opts.frame_dmr = 0;
+             opts.frame_provoice = 0;
+             opts.frame_dpmr = 0;
+             opts.frame_ysf = 0;
+             opts.frame_m17 = 0;
+             opts.frame_tetra = 1;
+             state.samplesPerSymbol = 3;
+             state.symbolCenter = 1;
+             opts.mod_c4fm = 0;
+             opts.mod_qpsk = 1;
+             opts.mod_gfsk = 0;
+             state.rf_mod = 1;
+             opts.pulse_digi_rate_out = 8000;
+             opts.pulse_digi_out_channels = 1;
+             opts.dmr_stereo = 0;
+             opts.dmr_mono = 0;
+             state.dmr_stereo = 0;
+             opts.rtl_bandwidth = 24;
+             opts.use_cosine_filter = 0;
+             sprintf (opts.output_name, "TETRA");
+             fprintf (stderr, "Setting symbol rate to 18000 / second (pi/4-DQPSK)\n");
+             fprintf (stderr, "Decoding only TETRA frames.\n");
+             if (optarg[0] == 'T' && optarg[1] >= '0' && optarg[1] <= '9')
+             {
+               int cc_val = atoi(&optarg[1]);
+               if (cc_val >= 0 && cc_val <= 63)
+               {
+                 opts.tetra_cc_filter = cc_val;
+                 fprintf (stderr, "TETRA Colour Code Filter set to %02d\n", opts.tetra_cc_filter);
+               }
+             }
            }
            break;
          //don't mess with the modulations unless you really need to
