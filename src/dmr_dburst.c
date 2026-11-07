@@ -630,9 +630,9 @@ void dmr_data_burst_handler(dsd_opts * opts, dsd_state * state, uint8_t info[196
     fprintf (stderr, "%s", KNRM);
   }
 
-  //might flicker the terminal on partially enabled systems, may need to find a better placement
-  if (IrrecoverableErrors == 0 && (is_bptc || is_emb) && databurst != 0x05 && databurst != 0x07 && databurst != 0x09)
-    state->dmr_is_ras = is_ras;
+  //only latch RAS on from valid RAS bursts; reset on channel/system change so voice EMB/PI/VLC bursts don't flicker [RAS]
+  if (IrrecoverableErrors == 0 && is_ras == 1 && (is_bptc || is_emb) && databurst != 0x05 && databurst != 0x07 && databurst != 0x09)
+    state->dmr_is_ras = 1;
 
   if (IrrecoverableErrors == 0 && CRCCorrect == 0 && is_ras == 0 && databurst != 0x09 && databurst != 0x05)
   {

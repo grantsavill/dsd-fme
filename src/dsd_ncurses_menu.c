@@ -837,8 +837,6 @@ void ncursesMenu (dsd_opts * opts, dsd_state * state)
       refresh();
       wscanw(entry_win, "%hd", &option); //%d
       noecho();
-      opts->dmr_mute_encL = 0;
-      opts->dmr_mute_encR = 0;
       if (option == 1)
       {
         state->K = 0;

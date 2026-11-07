@@ -58,6 +58,7 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
 
     if (csbk_pf == 0) //okay to run
     {
+      if (csbk_fid < 253) ambe_hw_reset_call(state->currentslot);
 
       //set overarching manufacturer in use when non-standard feature id set is up
       if (csbk_fid != 0) state->dmr_mfid = csbk_fid;
@@ -244,6 +245,7 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
             //just set to both for now, could go on tslot later
             state->p25_vc_freq[0] = freq;
             state->p25_vc_freq[1] = freq;
+            trunk_set_t3_vc_lpcn((lpchannum == 0xFFF) ? mbc_lpchannum : lpchannum);
           }
 
           //don't tune if currently a vc on the control channel
@@ -325,6 +327,7 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
                   if (GetCurrentFreq(opts->rigctl_sockfd) != freq)
                     SetFreq(opts->rigctl_sockfd, freq);
                   state->p25_vc_freq[0] = state->p25_vc_freq[1] = freq;
+                  trunk_set_t3_vc_lpcn((lpchannum == 0xFFF) ? mbc_lpchannum : lpchannum);
                   opts->p25_is_tuned = 1; //set to 1 to set as currently tuned so we don't keep tuning nonstop
                   state->last_vc_sync_time = time(NULL);
                   state->last_t3_tune_time = time(NULL); //set here so a random p_clear on the opposite slot doesn't send us back to the CC
@@ -382,6 +385,7 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
                   if (opts->rtlsdr_center_freq != tempf)
                     rtl_dev_tune (opts, freq);
                   state->p25_vc_freq[0] = state->p25_vc_freq[1] = freq;
+                  trunk_set_t3_vc_lpcn((lpchannum == 0xFFF) ? mbc_lpchannum : lpchannum);
                   opts->p25_is_tuned = 1;
                   state->last_vc_sync_time = time(NULL);
                   state->last_t3_tune_time = time(NULL); //set here so a random p_clear on the opposite slot doesn't send us back to the CC
@@ -526,6 +530,8 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
                 state->payload_keyidR = 0;
                 state->dmr_soR = 0;
               }
+              if (state->currentslot == 0 || csbk_fid == 253) ambe_hw_reset_call(0);
+              if (state->currentslot == 1 || csbk_fid == 253) ambe_hw_reset_call(1);
 
               //rigctl
               if (opts->use_rigctl == 1)
@@ -733,6 +739,14 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
           fprintf (stderr, " LPCN CH2: %d; CC: %d;", bcast_ch2, cc_ch2);
           if (ch2_flag == 0) fprintf (stderr, " Add;");
           if (ch2_flag == 1) fprintf (stderr, " Remove;");
+
+          if (opts->p25_is_tuned == 0)
+          {
+            if (ch1_flag == 0 && bcast_ch1 != 0 && bcast_ch1 != 0xFFF && cc_ch1 == state->dmr_color_code)
+              trunk_set_t3_cc_lpcn(bcast_ch1);
+            else if (ch2_flag == 0 && bcast_ch2 != 0 && bcast_ch2 != 0xFFF && cc_ch2 == state->dmr_color_code)
+              trunk_set_t3_cc_lpcn(bcast_ch2);
+          }
         }
 
         //CallTimer_parms
@@ -1243,6 +1257,12 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
           source = (uint32_t)ConvertBitIntoBytes(&cs_pdu_bits[64], 16);
           int rest = (uint32_t)ConvertBitIntoBytes(&cs_pdu_bits[60], 4);
           fprintf (stderr, "Source: %d - Target: %d - Rest LSN: %d", source, target, rest);
+          if (rest > 0)
+          {
+            state->dmr_rest_channel = rest;
+            if (state->trunk_chan_map[rest] != 0)
+              state->p25_cc_freq = state->trunk_chan_map[rest];
+          }
         }
         else fprintf (stderr, "Source: %d - Target: %d ", source, target);
 
@@ -1270,7 +1290,20 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
         fprintf (stderr, "\n");
         fprintf (stderr, "%s", KYEL);
 
-        fprintf (stderr, " Capacity Plus CSBK 0x3A ");
+        uint8_t fl = (uint8_t)ConvertBitIntoBytes(&cs_pdu_bits[16], 2);
+        uint8_t ts = cs_pdu_bits[18];
+        uint8_t res = cs_pdu_bits[19];
+        uint8_t rest_channel = (uint8_t)ConvertBitIntoBytes(&cs_pdu_bits[20], 4);
+        fprintf (stderr, " Capacity Plus CSBK 0x3A - FL: %d TS: %d RS: %d - Rest LSN: %d ", fl, ts, res, rest_channel);
+        if (rest_channel > 0)
+        {
+          state->dmr_rest_channel = rest_channel;
+          state->dmr_mfid = 0x10;
+          sprintf (state->dmr_branding, "%s", "Motorola");
+          sprintf (state->dmr_branding_sub, "%s", "Cap+ ");
+          if (state->trunk_chan_map[rest_channel] != 0)
+            state->p25_cc_freq = state->trunk_chan_map[rest_channel];
+        }
 
         // 01:15:08 Sync: +DMR   slot1  [slot2] | Color Code=03 | CSBK
         // Capacity Plus Channel Status - FL: 3 TS: 1 RS: 0 - Rest Channel 1 - Single Block
@@ -1341,7 +1374,7 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
         int i, j, k, x;
         //tg and channel info for trunking purposes
         uint16_t t_tg[24];
-        char cap_active[20]; //local string to concantenate to active channel stuff
+        char cap_active[32]; //local string to concantenate to active channel stuff
         uint8_t empty[24]; //used to evaluate whether or not all channels are idle or not with memcmp after loading
 
         //sanity check
@@ -1381,7 +1414,7 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
         //assign to cc freq to follow during no sync
         if (state->trunk_chan_map[rest_channel] != 0)
         {
-          // state->p25_cc_freq = state->trunk_chan_map[rest_channel];
+          state->p25_cc_freq = state->trunk_chan_map[rest_channel];
           //set to always tuned
           opts->p25_is_tuned = 1;
         }
@@ -1543,7 +1576,7 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
               if (tg != 0) k++;
 
               //add active channel to display string
-              sprintf (cap_active, "LSN:%d TG:%d; ", i+1, tg);
+              sprintf (cap_active, "LSN: %d TG: %d; ", i+1, tg);
               strcat (state->active_channel[i+1], cap_active);
             }
             else if (pch[i] == 1) //private or data channels
@@ -1561,7 +1594,7 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
               //lots of short data bursts blink in and out
               if (1 == 1) //opts->trunk_tune_private_calls
               {
-                sprintf (cap_active, "LSN:%d PC:%d; ", i+1, tg);
+                sprintf (cap_active, "LSN: %d PC: %d; ", i+1, tg);
                 strcat (state->active_channel[i+1], cap_active);
               }
 
@@ -1659,7 +1692,7 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
                     state->p25_vc_freq[0] = state->p25_vc_freq[1] = state->trunk_chan_map[j+1];
                     opts->p25_is_tuned = 1; //set to 1 to set as currently tuned so we don't keep tuning nonstop
                     state->last_vc_sync_time = time(NULL);
-                    j = 11; //break loop
+                    j = 16; //break loop
                   }
 
                   //rtl
@@ -1695,7 +1728,7 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
                     state->p25_vc_freq[0] = state->p25_vc_freq[1] = state->trunk_chan_map[j+1];
                     opts->p25_is_tuned = 1;
                     state->last_vc_sync_time = time(NULL);
-                    j = 11; //break loop
+                    j = 16; //break loop
                     #endif
                   }
 
@@ -1725,10 +1758,13 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
 
           //check here to see if we can go to the current rest lsn, if not already on it
           int busy = memcmp (empty, t_tg, sizeof(empty));
+          if (!busy)
+            trunk_set_cap_plus_cur_lsn(rest_channel);
 
           //testing (don't keep setting on quick data call LSN flip flops but same frequency for rest channel, other misc conditions)
           // if (!busy && rest_channel != state->dmr_rest_channel && opts->p25_trunk == 1 && state->p25_cc_freq != state->trunk_chan_map[rest_channel])
-          if (!busy && opts->p25_trunk == 1 && state->p25_cc_freq != state->trunk_chan_map[rest_channel])
+          if (!busy && opts->p25_trunk == 1 && state->trunk_chan_map[rest_channel] != 0 &&
+              (state->p25_cc_freq != state->trunk_chan_map[rest_channel] || state->p25_vc_freq[0] != 0))
           {
             //assign now, ideally, this should always trigger a positive p_clear when needed
             // state->dmr_rest_channel = rest_channel;
@@ -1738,8 +1774,8 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
               state->p25_cc_freq = state->trunk_chan_map[rest_channel];
 
             //Craft a fake CSBK pdu send it to run as a p_clear to go to rest channel if its available (no calls currently)
-            uint8_t dummy[12]; uint8_t* dbits; memset (dummy, 0, sizeof(dummy)); dummy[0] = 46; dummy[1] = 253;
-              dmr_cspdu (opts, state, dbits, dummy, 1, 0);
+            uint8_t dummy[12]; uint8_t dbits[96]; memset (dummy, 0, sizeof(dummy)); memset (dbits, 0, sizeof(dbits)); dummy[0] = 46; dummy[1] = 253;
+            dmr_cspdu (opts, state, dbits, dummy, 1, 0);
           }
 
         } //if (fl == 1 || fl == 3)
@@ -2032,7 +2068,7 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
         fprintf (stderr, " Target: %d;", ttarget);
 
         //Run p_clear to decide whether or not to return to the control channel
-        uint8_t dummy[12]; uint8_t* dbits; memset (dummy, 0, sizeof(dummy)); dummy[0] = 46; dummy[1] = 12;
+        uint8_t dummy[12]; uint8_t dbits[96]; memset (dummy, 0, sizeof(dummy)); memset (dbits, 0, sizeof(dbits)); dummy[0] = 46; dummy[1] = 12;
         dmr_cspdu (opts, state, dbits, dummy, 1, 0);
 
         state->dmr_mfid = 0x06;
@@ -2081,7 +2117,7 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
         fprintf (stderr, " Hytera XPT Site Status - Free LCN: %d SN: %d", xpt_free, xpt_seq);
 
         //strings for active channels
-        char xpt_active[20];
+        char xpt_active[32];
         if (xpt_seq == 0) sprintf (state->active_channel[0], "XPT "); //add initial if sequence 0
         else sprintf (state->active_channel[xpt_seq], "%s", ""); //blank current sequence to re-write to
         state->last_active_time = time(NULL);
@@ -2130,11 +2166,11 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
           //concantenate string to active channels for ncurses display
           if (tg != 0)
           {
-            if (xpt_ch[i] == 3) sprintf (xpt_active, "LSN:%d TG:%d; ", i+xpt_bank+1, tg);
-            if (xpt_ch[i] == 2) sprintf (xpt_active, "LSN:%d PC:%d; ", i+xpt_bank+1, tg);
+            if (xpt_ch[i] == 3) sprintf (xpt_active, "LSN: %d TG: %d; ", i+xpt_bank+1, tg);
+            if (xpt_ch[i] == 2) sprintf (xpt_active, "LSN: %d PC: %d; ", i+xpt_bank+1, tg);
             //last two are unknown status but have an associated target value
-            if (xpt_ch[i] == 1) sprintf (xpt_active, "LSN:%d UK:%d; ", i+xpt_bank+1, tg);
-            if (xpt_ch[i] == 0) sprintf (xpt_active, "LSN:%d UK:%d; ", i+xpt_bank+1, tg);
+            if (xpt_ch[i] == 1) sprintf (xpt_active, "LSN: %d UK: %d; ", i+xpt_bank+1, tg);
+            if (xpt_ch[i] == 0) sprintf (xpt_active, "LSN: %d UK: %d; ", i+xpt_bank+1, tg);
             strcat (state->active_channel[xpt_seq], xpt_active); //add string to active channel seq
           }
 
@@ -2453,7 +2489,17 @@ void dmr_decode_syscode(dsd_opts * opts, dsd_state * state, uint8_t * cs_pdu_bit
   uint16_t syscode = (uint16_t)ConvertBitIntoBytes(&cs_pdu_bits[40], 14);
 
   if (type == 0)
+  {
+    if (state->dmr_t3_syscode != syscode)
+      state->dmr_is_ras = 0;
     state->dmr_t3_syscode = syscode;
+    state->dmr_rest_channel = -1;
+    if (state->dmr_branding_sub[0] != 0)
+    {
+      state->dmr_branding[0] = 0;
+      state->dmr_branding_sub[0] = 0;
+    }
+  }
 
   uint8_t model = (uint8_t)ConvertBitIntoBytes(&cs_pdu_bits[40], 2);
   uint16_t net = 0;

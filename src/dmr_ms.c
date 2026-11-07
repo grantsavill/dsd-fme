@@ -247,6 +247,17 @@ void dmrMS (dsd_opts * opts, dsd_state * state)
 
   state->dmr_ms_mode = 1;
 
+  if (opts->dmr_cc_filter >= 0 && opts->dmr_cc_filter <= 15 && (int)state->dmr_color_code != opts->dmr_cc_filter)
+  {
+    memset (state->f_l4, 0, sizeof(state->f_l4));
+    memset (state->s_l4, 0, sizeof(state->s_l4));
+    memset (state->s_l4u, 0, sizeof(state->s_l4u));
+    memset (state->audio_out_temp_buf, 0, sizeof(state->audio_out_temp_buf));
+    memset (state->s_l, 0, sizeof(state->s_l));
+    memset (state->s_lu, 0, sizeof(state->s_lu));
+    goto SKIP_MS_VOICE;
+  }
+
   memcpy (ambe_fr4, ambe_fr2, sizeof(ambe_fr2));
 
   //copy ambe_fr frames first, running process mbe will correct them,
@@ -283,6 +294,15 @@ void dmrMS (dsd_opts * opts, dsd_state * state)
   ambe2_codeword_print_i(opts, ambe_fr3);
   #endif
 
+  if (vc == 6)
+  {
+    //this needs to run prior to embedded link control
+    if (state->payload_algid == 0x02)
+      hytera_enhanced_alg_refresh(state);
+
+    dmr_data_burst_handler(opts, state, (uint8_t *)dummy_bits, 0xEB);
+  }
+
   processMbeFrame (opts, state, NULL, ambe_fr, NULL);
     memcpy(state->f_l4[0], state->audio_out_temp_buf, sizeof(state->audio_out_temp_buf));
     memcpy(state->s_l4[0], state->s_l, sizeof(state->s_l));
@@ -313,11 +333,6 @@ void dmrMS (dsd_opts * opts, dsd_state * state)
 
   if (vc == 6)
   {
-    //this needs to run prior to embedded link control
-    if (state->payload_algid == 0x02)
-        hytera_enhanced_alg_refresh(state);
-    
-    dmr_data_burst_handler(opts, state, (uint8_t *)dummy_bits, 0xEB);
     //check the single burst/reverse channel opportunity
     dmr_sbrc (opts, state, power);
 
@@ -333,8 +348,10 @@ void dmrMS (dsd_opts * opts, dsd_state * state)
   // cach_err = dmr_cach (opts, state, cachdata);
 
   //update voice sync time for trunking purposes (particularly Con+)
+  state->last_cc_sync_time = time(NULL);
   state->last_vc_sync_time = time(NULL);
 
+  SKIP_MS_VOICE:
   vc++;
 
   //reset emb components
@@ -566,11 +583,23 @@ void dmrMSBootstrap (dsd_opts * opts, dsd_state * state)
   if (state->dmr_color_code != 16)
     fprintf (stderr, "| Color Code=%02d ", state->dmr_color_code);
   else fprintf (stderr, "| Color Code=XX ");
+  if (opts->dmr_cc_filter >= 0 && opts->dmr_cc_filter <= 15 && (int)state->dmr_color_code != opts->dmr_cc_filter)
+  {
+    fprintf (stderr, "| VC* [CC FILTER: %02d]\n", opts->dmr_cc_filter);
+    memset (state->f_l4, 0, sizeof(state->f_l4));
+    memset (state->s_l4, 0, sizeof(state->s_l4));
+    memset (state->s_l4u, 0, sizeof(state->s_l4u));
+    memset (state->audio_out_temp_buf, 0, sizeof(state->audio_out_temp_buf));
+    memset (state->s_l, 0, sizeof(state->s_l));
+    memset (state->s_lu, 0, sizeof(state->s_lu));
+    goto SKIP_MS_BOOT;
+  }
   fprintf (stderr, "| VC* ");
   fprintf (stderr, "\n");
+  state->last_cc_sync_time = time(NULL);
 
   //alg reset
-  //dmr_alg_reset (opts, state);
+  dmr_alg_reset (opts, state);
 
   memcpy (ambe_fr4, ambe_fr2, sizeof(ambe_fr2));
 
@@ -642,6 +671,7 @@ void dmrMSBootstrap (dsd_opts * opts, dsd_state * state)
 
   //errors due to skipping other slot
   // cach_err = dmr_cach (opts, state, cachdata);
+  SKIP_MS_BOOT:
   if (timestr != NULL)
   {
     free (timestr);

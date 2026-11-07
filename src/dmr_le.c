@@ -86,6 +86,43 @@ void dmr_late_entry_mi (dsd_opts * opts, dsd_state * state)
 
   if (g[0] && g[1] && g[2])
   {
+    if (slot == 0 && state->payload_algid == 0 && ((state->dmr_so & 0x40) != 0 || (state->dmr_so & 0x8000) == 0) && mi_crc_ok == 1 && mi_final != 0)
+    {
+      if (state->forced_alg_id > 1 && state->forced_alg_id != 0x16)
+      {
+        state->payload_algid = state->forced_alg_id;
+        state->payload_keyid = 0xFF;
+        state->dmr_so |= 0x8040;
+      }
+      else if (state->R != 0 && state->K == 0 && state->K1 == 0 && state->aes_key_loaded[0] == 0)
+      {
+        state->payload_algid = 0x21;
+        state->dmr_so |= 0x8040;
+      }
+      else if ((state->dmr_so & 0x8000) == 0 && (state->R != 0 || state->aes_key_loaded[0] == 1 || state->keyloader == 1))
+      {
+        state->dmr_so |= 0x40;
+      }
+    }
+    if (slot == 1 && state->payload_algidR == 0 && ((state->dmr_soR & 0x40) != 0 || (state->dmr_soR & 0x8000) == 0) && mi_crc_ok == 1 && mi_final != 0)
+    {
+      if (state->forced_alg_id > 1 && state->forced_alg_id != 0x16)
+      {
+        state->payload_algidR = state->forced_alg_id;
+        state->payload_keyidR = 0xFF;
+        state->dmr_soR |= 0x8040;
+      }
+      else if (state->RR != 0 && state->K == 0 && state->K1 == 0 && state->aes_key_loaded[1] == 0)
+      {
+        state->payload_algidR = 0x21;
+        state->dmr_soR |= 0x8040;
+      }
+      else if ((state->dmr_soR & 0x8000) == 0 && (state->RR != 0 || state->aes_key_loaded[1] == 1 || state->keyloader == 1))
+      {
+        state->dmr_soR |= 0x40;
+      }
+    }
+
     if (slot == 0 && state->payload_algid != 0 && state->payload_algid != 0x26)
     {
       if (state->payload_mi != mi_final)
@@ -325,10 +362,16 @@ void dmr_alg_reset (dsd_opts * opts, dsd_state * state)
 {
   UNUSED(opts);
 
-  state->dropL = 256;
-  state->dropR = 256;
-  state->DMRvcL = 0;
-  state->DMRvcR = 0;
+  if (state->currentslot == 0)
+  {
+    state->dropL = 256;
+    state->DMRvcL = 0;
+  }
+  else
+  {
+    state->dropR = 256;
+    state->DMRvcR = 0;
+  }
   // state->payload_miP = 0; //running these clears out before we can create a new keystream
   // state->payload_miN = 0; //running these clears out before we can create a new keystream
 }
@@ -564,7 +607,8 @@ void dmr_sbrc (dsd_opts * opts, dsd_state * state, uint8_t power)
 
         if (slot == 0) //may not need the state->errs anymore //&& state->errs < 3
         {
-          if (state->dmr_so & 0x40 && key != 0 && alg != 0)
+          if (((state->dmr_so & 0x40) != 0 || (state->dmr_so & 0x8000) == 0) &&
+              key != 0 && (alg == 1 || alg == 2 || alg == 4 || alg == 5 || alg == 6))
           {
             //if we aren't forcing a particular alg or privacy key set
             if (state->forced_alg_id == 0)
@@ -580,10 +624,13 @@ void dmr_sbrc (dsd_opts * opts, dsd_state * state, uint8_t power)
               if (alg == 6) fprintf (stderr, " Caltta BP");
               fprintf (stderr, "%s ", KNRM);
               if (opts->payload == 1) fprintf (stderr, "\n");
+              state->dmr_so |= 0x8040;
               if (state->payload_keyid != key)
                 state->payload_keyid = key;
               if (state->payload_algid != alg)
                 state->payload_algid = alg + 0x20; //assuming DMRA approved alg values (moto patent)
+              if (state->keyloader == 1)
+                keyring (opts, state);
             }
 
           }
@@ -591,7 +638,8 @@ void dmr_sbrc (dsd_opts * opts, dsd_state * state, uint8_t power)
 
         if (slot == 1) //may not need the state->errs anymore //&& state->errsR < 3
         {
-          if (state->dmr_soR & 0x40 && key != 0 && alg != 0)
+          if (((state->dmr_soR & 0x40) != 0 || (state->dmr_soR & 0x8000) == 0) &&
+              key != 0 && (alg == 1 || alg == 2 || alg == 4 || alg == 5 || alg == 6))
           {
             //if we aren't forcing a particular alg or privacy key set
             if (state->forced_alg_id == 0)
@@ -607,10 +655,13 @@ void dmr_sbrc (dsd_opts * opts, dsd_state * state, uint8_t power)
               if (alg == 6) fprintf (stderr, " Caltta BP");
               fprintf (stderr, "%s ", KNRM);
               if (opts->payload == 1) fprintf (stderr, "\n");
+              state->dmr_soR |= 0x8040;
               if (state->payload_keyidR != key)
                 state->payload_keyidR = key;
               if (state->payload_algidR != alg)
                 state->payload_algidR = alg + 0x20; //assuming DMRA approved alg values (moto patent)
+              if (state->keyloader == 1)
+                keyring (opts, state);
             }
 
           }

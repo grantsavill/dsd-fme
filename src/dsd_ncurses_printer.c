@@ -261,6 +261,7 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
     printw ("\n");
   }
 
+
   if (opts->audio_out_type == 0 && opts->analog_only == 0)
   {
     printw ("| Pulse Digital Output: %i kHz; %i Ch; G: %02.0f%%", opts->pulse_digi_rate_out/1000, opts->pulse_digi_out_channels, state->aout_gain*2);
@@ -514,7 +515,7 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
   {
     printw ("| Scan Mode: ");
     if (state->lcn_freq_roll != 0)
-      printw (" Frequency: %.06lf Mhz", (double)state->trunk_lcn_freq[state->lcn_freq_roll-1]/1000000);
+      printw (" Freq: %.06lf MHz", (double)state->trunk_lcn_freq[state->lcn_freq_roll-1]/1000000);
     printw (" Speed: %.02lf sec \n", opts->trunk_hangtime);  //not sure values less than 1 make a difference, may be system/environment dependent
   }
 
@@ -760,7 +761,7 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
         if (idas == 1) printw ("Monitoring RTCH2 Channel"); //Idas RTCH2 Channel
         if (state->p25_cc_freq != 0)
         {
-          printw (" - Frequency: %.06lf Mhz ", (double)state->p25_cc_freq/1000000);
+          printw (" - Freq: %.06lf MHz ", (double)state->p25_cc_freq/1000000);
         }
       }
       else if (opts->p25_is_tuned == 1)
@@ -769,7 +770,7 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
         if (idas == 1) printw ("Monitoring RTCH2 Channel"); //Idas RTCH2
         if (state->p25_vc_freq[0] != 0)
         {
-          printw (" - Frequency: %.06lf Mhz ", (double)state->p25_vc_freq[0]/1000000);
+          printw (" - Freq: %.06lf MHz ", (double)state->p25_vc_freq[0]/1000000);
         }
       }
 
@@ -907,24 +908,38 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
     {
       printw ("DMR BS - DCC: %02i; ", state->dmr_color_code);
       // printw ("%s %s", state->dmr_branding, state->dmr_branding_sub);
-      printw ("%s ", state->dmr_branding);
-      printw ("%s", state->dmr_branding_sub);
+      if (state->dmr_branding[0] != 0)
+        printw ("%s ", state->dmr_branding);
+      if (strcmp(state->dmr_branding_sub, "Cap+ ") == 0)
+        printw ("Cap+; ");
+      else
+        printw ("%s", state->dmr_branding_sub);
       printw ("%s", state->dmr_site_parms); //site id, net id, etc
       if (state->dmr_rest_channel > 0)
       {
-        printw ("Rest LSN: %02d; ", state->dmr_rest_channel);
         if (state->trunk_chan_map[state->dmr_rest_channel] != 0)
         {
-          printw ("Freq: %.06lf Mhz", (double)state->trunk_chan_map[state->dmr_rest_channel]/1000000);
+          printw ("Freq: %.06lf MHz; ", (double)state->trunk_chan_map[state->dmr_rest_channel]/1000000);
         }
+        printw ("Rest LSN: %d ", state->dmr_rest_channel);
       }
-      else if (state->p25_cc_freq != 0)
+      else
       {
-        printw ("Freq: %.06lf MHz", (double)state->p25_cc_freq/1000000);
+        int cc_lpcn = trunk_get_t3_cc_lpcn(state);
+        if (state->p25_cc_freq != 0)
+        {
+          printw ("Freq: %.06lf MHz", (double)state->p25_cc_freq/1000000);
+          if (cc_lpcn > 0)
+            printw ("; ");
+          else
+            printw (" ");
+        }
+        if (cc_lpcn > 0)
+          printw ("LPCN: %d ", cc_lpcn);
       }
 
       if (state->dmr_is_ras == 1)
-        printw ("{RAS}");
+        printw ("[RAS]");
 
     }
     else if (lls == 32 || lls == 33 || lls == 34)
@@ -932,7 +947,7 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
       printw ("DMR MS - DCC: %02i; ", state->dmr_color_code);
 
       if (state->dmr_is_ras == 1)
-        printw ("{RAS}");
+        printw ("[RAS]");
     }
     else if (lls == 0 || lls == 1) //P1
     {
@@ -1399,11 +1414,27 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
       {
         printw ("|        | "); //Currently Tuned Frequency
 
-        // Tuned Frequency Display
-        if (state->p25_vc_freq[0] != 0)
+        // Tuned Frequency and Channel (Cap+/XPT LSN, TIII LPCN, Con+ LCN) Display
+        long int cur_freq = trunk_get_current_freq(opts, state);
+        if (opts->p25_trunk == 1)
+        {
+          char chan_str[32];
+          trunk_get_dmr_channel_str(opts, state, cur_freq, chan_str, sizeof(chan_str));
+          if (cur_freq != 0 || chan_str[0] != '\0')
+          {
+            attron(COLOR_PAIR(4));
+            if (cur_freq != 0 && chan_str[0] != '\0')
+              printw ("Freq: %.06lf MHz; %s  ", (double)cur_freq/1000000, chan_str);
+            else if (cur_freq != 0)
+              printw ("Freq: %.06lf MHz  ", (double)cur_freq/1000000);
+            else
+              printw ("%s  ", chan_str);
+          }
+        }
+        else if (state->p25_vc_freq[0] != 0)
         {
           attron(COLOR_PAIR(4));
-          printw ("Frequency: %.06lf MHz  ", (double)state->p25_vc_freq[0]/1000000);
+          printw ("Freq: %.06lf MHz  ", (double)state->p25_vc_freq[0]/1000000);
         }
 
         //TG Hold, if specified by user

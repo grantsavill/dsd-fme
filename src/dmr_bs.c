@@ -11,6 +11,16 @@
 
 // #define PRINT_AMBE72 //enable to view 72-bit AMBE codewords
 
+static inline int dmr_bs_sync_match(const char *sync, const char *pat)
+{
+  int m = 0;
+  for (int i = 0; i < 24; i++)
+  {
+    if (sync[i] == pat[i]) m++;
+  }
+  return (m >= 20);
+}
+
 //A subroutine for processing each TDMA frame individually to allow for
 //processing voice and/or data on both BS slots (channels) simultaneously
 void dmrBS (dsd_opts * opts, dsd_state * state)
@@ -258,14 +268,15 @@ void dmrBS (dsd_opts * opts, dsd_state * state)
   }
 
   //reset vc counters to 1 if new voice sync frame on each slot
-  if ( strcmp (sync, DMR_BS_VOICE_SYNC) == 0)
+  if ( dmr_bs_sync_match (sync, DMR_BS_VOICE_SYNC) )
   {
     if (internalslot == 0) vc1 = 1;
     if (internalslot == 1) vc2 = 1;
+    dmr_alg_reset (opts, state);
   }
 
   //check for sync pattern here after collected the rest of the payload, decide what to do with it
-  if ( strcmp (sync, DMR_BS_DATA_SYNC) == 0 )
+  if ( dmr_bs_sync_match (sync, DMR_BS_DATA_SYNC) )
   {
 
     fprintf (stderr,"%s ", timestr);
@@ -371,49 +382,87 @@ void dmrBS (dsd_opts * opts, dsd_state * state)
   #endif //RC_TESTING
 
   //check to see if we are expecting a VC at this point vc > 7
-  if (strcmp (sync, DMR_BS_DATA_SYNC) != 0 && internalslot == 0 && vc1 > 6)
+  if (!dmr_bs_sync_match (sync, DMR_BS_DATA_SYNC) && internalslot == 0 && vc1 > 6)
   {
-    fprintf (stderr,"%s ", timestr);
+    //if we joined mid-superframe or missed VC1 sync on slot 1, check if EMB is a valid VC2 (lcss == 1) on our Color Code
+    if (tact_okay == 1 && state->dmr_color_code <= 15 && QR_16_7_6_decode(emb_pdu))
+    {
+      uint8_t emb_cc = ((emb_pdu[0] << 3) + (emb_pdu[1] << 2) + (emb_pdu[2] << 1) + emb_pdu[3]);
+      uint8_t emb_lcss = ((emb_pdu[5] << 1) + emb_pdu[6]);
+      if (emb_cc == state->dmr_color_code && emb_lcss == 1)
+      {
+        vc1 = 2;
+        for (i = 0; i < 48; i++)
+          state->dmr_embedded_signalling[0][1][i] = syncdata[i];
+        if (state->DMRvcL == 0) state->DMRvcL = 3;
+        if (state->dropL == 256) state->dropL = 277;
+      }
+    }
+    if (vc1 > 6)
+    {
+      if (state->dmrburstL == 16) state->dmrburstL = 17;
+      fprintf (stderr,"%s ", timestr);
 
-    //simplifying things
-    // char polarity[3];
-    char light[18];
+      //simplifying things
+      // char polarity[3];
+      char light[18];
 
-    sprintf (light, "%s", " [SLOT1]  slot2  ");
-    fprintf (stderr,"Sync:  DMR %s", light);
-    fprintf (stderr, "%s", KCYN);
-    fprintf (stderr, "| Frame Sync Err: %d", vc1);
-    fprintf (stderr, "%s", KNRM);
-    fprintf (stderr, "\n");
-    vc1++;
-    //this should give it enough time to find the next frame sync pattern, if it exists, if not, then trigger a resync
-    if ( vc1 > 13 ) goto END;
-    else goto SKIP;
+      sprintf (light, "%s", " [SLOT1]  slot2  ");
+      fprintf (stderr,"Sync:  DMR %s", light);
+      fprintf (stderr, "%s", KCYN);
+      fprintf (stderr, "| Frame Sync Err: %d", vc1);
+      fprintf (stderr, "%s", KNRM);
+      fprintf (stderr, "\n");
+      vc1++;
+      //only trigger a resync if the opposite slot is not actively decoding voice
+      if ( vc1 > 13 && vc2 > 6 ) goto END;
+      if ( vc1 > 13 ) vc1 = 13;
+      goto SKIP;
+    }
   }
 
   //check to see if we are expecting a VC at this point vc > 7
-  if (strcmp (sync, DMR_BS_DATA_SYNC) != 0 && internalslot == 1 && vc2 > 6)
+  if (!dmr_bs_sync_match (sync, DMR_BS_DATA_SYNC) && internalslot == 1 && vc2 > 6)
   {
-    fprintf (stderr,"%s ", timestr);
+    //if we joined mid-superframe or missed VC1 sync on slot 2, check if EMB is a valid VC2 (lcss == 1) on our Color Code
+    if (tact_okay == 1 && state->dmr_color_code <= 15 && QR_16_7_6_decode(emb_pdu))
+    {
+      uint8_t emb_cc = ((emb_pdu[0] << 3) + (emb_pdu[1] << 2) + (emb_pdu[2] << 1) + emb_pdu[3]);
+      uint8_t emb_lcss = ((emb_pdu[5] << 1) + emb_pdu[6]);
+      if (emb_cc == state->dmr_color_code && emb_lcss == 1)
+      {
+        vc2 = 2;
+        for (i = 0; i < 48; i++)
+          state->dmr_embedded_signalling[1][1][i] = syncdata[i];
+        if (state->DMRvcR == 0) state->DMRvcR = 3;
+        if (state->dropR == 256) state->dropR = 277;
+      }
+    }
+    if (vc2 > 6)
+    {
+      if (state->dmrburstR == 16) state->dmrburstR = 17;
+      fprintf (stderr,"%s ", timestr);
 
-    //simplifying things
-    // char polarity[3];
-    char light[18];
+      //simplifying things
+      // char polarity[3];
+      char light[18];
 
-    sprintf (light, "%s", "  slot1  [SLOT2] ");
-    fprintf (stderr,"Sync:  DMR %s", light);
-    fprintf (stderr, "%s", KCYN);
-    fprintf (stderr, "| Frame Sync Err: %d", vc2);
-    fprintf (stderr, "%s", KNRM);
-    fprintf (stderr, "\n");
-    vc2++;
-    //this should give it enough time to find the next frame sync pattern, if it exists, if not, then trigger a resync
-    if ( vc2 > 13 ) goto END;
-    else goto SKIP;
+      sprintf (light, "%s", "  slot1  [SLOT2] ");
+      fprintf (stderr,"Sync:  DMR %s", light);
+      fprintf (stderr, "%s", KCYN);
+      fprintf (stderr, "| Frame Sync Err: %d", vc2);
+      fprintf (stderr, "%s", KNRM);
+      fprintf (stderr, "\n");
+      vc2++;
+      //only trigger a resync if the opposite slot is not actively decoding voice
+      if ( vc2 > 13 && vc1 > 6 ) goto END;
+      if ( vc2 > 13 ) vc2 = 13;
+      goto SKIP;
+    }
   }
 
   //only play voice on no data sync, and VC values are within expected values 1-6
-  if (strcmp (sync, DMR_BS_DATA_SYNC) != 0) //we already have a tact ecc check, so we won't get here without that, see if there is any other eccs we can run just to make sure
+  if (!dmr_bs_sync_match (sync, DMR_BS_DATA_SYNC)) //we already have a tact ecc check, so we won't get here without that, see if there is any other eccs we can run just to make sure
   {
 
     //check the embedded signalling, if bad at this point, we probably aren't quite in sync
@@ -421,8 +470,25 @@ void dmrBS (dsd_opts * opts, dsd_state * state)
     else emb_ok = 0;
 
     //disable the goto END; if this causes more problems than fixing on late entry dual voices i.e., lots of forced resyncs
-    if ( (strcmp (sync, DMR_BS_VOICE_SYNC) != 0) && emb_ok == 0) goto END; //fprintf (stderr, "EMB BAD? ");
-    else if (emb_ok == 1)
+    if ( !dmr_bs_sync_match (sync, DMR_BS_VOICE_SYNC) && emb_ok == 0)
+    {
+      if (internalslot == 0 && vc2 <= 6)
+      {
+        if (state->dmrburstL == 16) state->dmrburstL = 17;
+        vc1 = 7;
+        emb_ok = 1;
+        goto SKIP;
+      }
+      if (internalslot == 1 && vc1 <= 6)
+      {
+        if (state->dmrburstR == 16) state->dmrburstR = 17;
+        vc2 = 7;
+        emb_ok = 1;
+        goto SKIP;
+      }
+      goto END; //fprintf (stderr, "EMB BAD? ");
+    }
+    else if ( !dmr_bs_sync_match (sync, DMR_BS_VOICE_SYNC) && emb_ok == 1)
     {
       cc = ((emb_pdu[0] << 3) + (emb_pdu[1] << 2) + (emb_pdu[2] << 1) + emb_pdu[3]);
       power = emb_pdu[4];
@@ -430,14 +496,59 @@ void dmrBS (dsd_opts * opts, dsd_state * state)
       state->dmr_color_code = state->color_code = cc;
     }
 
-
-    skipcount = 0; //reset skip count if processing voice frames
     fprintf (stderr,"%s ", timestr);
 
     //simplifying things
     char polarity[3];
     char light[18];
     uint8_t vc;
+
+    if (opts->dmr_cc_filter >= 0 && opts->dmr_cc_filter <= 15 && (int)state->dmr_color_code != opts->dmr_cc_filter)
+    {
+      if (opts->inverted_dmr == 0) sprintf (polarity, "%s", "+");
+      else sprintf (polarity, "%s", "-");
+      if (internalslot == 0)
+      {
+        vc = vc1;
+        sprintf (light, "%s", " [SLOT1]  slot2  ");
+        memset (state->f_l4, 0, sizeof(state->f_l4));
+        memset (state->s_l4, 0, sizeof(state->s_l4));
+        memset (state->s_l4u, 0, sizeof(state->s_l4u));
+        memset (state->audio_out_temp_buf, 0, sizeof(state->audio_out_temp_buf));
+        memset (state->s_l, 0, sizeof(state->s_l));
+        memset (state->s_lu, 0, sizeof(state->s_lu));
+        vc1++;
+      }
+      else
+      {
+        vc = vc2;
+        sprintf (light, "%s", "  slot1  [SLOT2] ");
+        memset (state->f_r4, 0, sizeof(state->f_r4));
+        memset (state->s_r4, 0, sizeof(state->s_r4));
+        memset (state->s_r4u, 0, sizeof(state->s_r4u));
+        memset (state->audio_out_temp_bufR, 0, sizeof(state->audio_out_temp_bufR));
+        memset (state->s_r, 0, sizeof(state->s_r));
+        memset (state->s_ru, 0, sizeof(state->s_ru));
+        vc2++;
+      }
+      if (state->dmr_color_code != 16)
+        fprintf (stderr,"Sync: %sDMR %s| Color Code=%02d | VC%d [CC FILTER: %02d]\n", polarity, light, state->dmr_color_code, vc, opts->dmr_cc_filter);
+      else fprintf (stderr,"Sync: %sDMR %s| Color Code=XX | VC%d [CC FILTER: %02d]\n", polarity, light, vc, opts->dmr_cc_filter);
+
+      skipcount++;
+      cach_err = 0;
+      tact_okay = 1;
+      emb_ok = 1;
+      cc = 25;
+      power = 9;
+      lcss = 9;
+      if ( vc1 > 6 && vc2 > 6 && (vc1 > 14 || vc2 > 14) ) goto END;
+      if ( (opts->p25_trunk == 1 || opts->scanner_mode == 1) && ((time(NULL) - state->last_cc_sync_time) > opts->trunk_hangtime) ) goto END;
+      goto SKIP;
+    }
+
+    skipcount = 0; //reset skip count if processing voice frames
+
     if (internalslot == 0)
     {
       state->dmrburstL = 16;
@@ -610,11 +721,11 @@ void dmrBS (dsd_opts * opts, dsd_state * state)
     if (internalslot == 0) vc1++;
     if (internalslot == 1) vc2++;
 
-    //update cc amd vc sync time for trunking purposes (particularly Con+)
-    if (opts->p25_is_tuned == 1)
+    //update cc and vc sync time only when EMB Color Code was actually verified in this burst
+    if (emb_ok == 1)
     {
-      state->last_vc_sync_time = time(NULL);
       state->last_cc_sync_time = time(NULL);
+      state->last_vc_sync_time = time(NULL);
     }
 
     //reset err checks
@@ -629,7 +740,7 @@ void dmrBS (dsd_opts * opts, dsd_state * state)
 
     //Extra safeguards to break loop
     // if ( (vc1 > 7 && vc2 > 7) ) goto END;
-    if ( (vc1 > 14 || vc2 > 14) ) goto END;
+    if ( vc1 > 6 && vc2 > 6 && (vc1 > 14 || vc2 > 14) ) goto END;
 
   }
 
@@ -701,29 +812,9 @@ void dmrBS (dsd_opts * opts, dsd_state * state)
   fprintf (stderr, "| VOICE CACH/EMB ERR");
   fprintf (stderr, "%s", KNRM);
   fprintf (stderr, "\n");
-  //run refresh if either slot had an active MI in it.
-  if (state->payload_algid >= 0x21)
-  {
-    state->currentslot = 0;
-    dmr_alg_refresh (opts, state);
-  }
-  else if (state->payload_algid == 0x02)
-  {
-    state->currentslot = 0;
-    hytera_enhanced_alg_refresh(state);
-    dmr_alg_refresh (opts, state);
-  }
-  if (state->payload_algidR >= 0x21)
-  {
-    state->currentslot = 1;
-    dmr_alg_refresh (opts, state);
-  }
-  else if (state->payload_algidR == 0x02)
-  {
-    state->currentslot = 1;
-    hytera_enhanced_alg_refresh(state);
-    dmr_alg_refresh (opts, state);
-  }
+  // Do not run dmr_alg_refresh() here: END is reached when the opposite idle slot
+  // hits Frame Sync Err (vc > 13) right after a PI header was decoded, or mid-superframe,
+  // which would prematurely step the MI one superframe ahead of the transmitter!
 
   //failsafe to reset all data header and blocks when bad tact or emb
   dmr_reset_blocks (opts, state);
@@ -866,7 +957,7 @@ void dmrBSBootstrap (dsd_opts * opts, dsd_state * state)
   }
   sync[24] = 0;
 
-  if ( strcmp (sync, DMR_BS_VOICE_SYNC) != 0)
+  if ( !dmr_bs_sync_match (sync, DMR_BS_VOICE_SYNC) )
   {
     sync_okay = 0;
     goto END;
@@ -933,6 +1024,36 @@ void dmrBSBootstrap (dsd_opts * opts, dsd_state * state)
   fprintf (stderr,"%s ", timestr);
   char polarity[3];
   char light[18];
+
+  if (opts->dmr_cc_filter >= 0 && opts->dmr_cc_filter <= 15 && (int)state->dmr_color_code != opts->dmr_cc_filter)
+  {
+    if (opts->inverted_dmr == 0) sprintf (polarity, "%s", "+");
+    else sprintf (polarity, "%s", "-");
+    if (state->currentslot == 0)
+    {
+      sprintf (light, "%s", " [SLOT1]  slot2  ");
+      memset (state->f_l4, 0, sizeof(state->f_l4));
+      memset (state->s_l4, 0, sizeof(state->s_l4));
+      memset (state->s_l4u, 0, sizeof(state->s_l4u));
+      memset (state->audio_out_temp_buf, 0, sizeof(state->audio_out_temp_buf));
+      memset (state->s_l, 0, sizeof(state->s_l));
+      memset (state->s_lu, 0, sizeof(state->s_lu));
+    }
+    else
+    {
+      sprintf (light, "%s", "  slot1  [SLOT2] ");
+      memset (state->f_r4, 0, sizeof(state->f_r4));
+      memset (state->s_r4, 0, sizeof(state->s_r4));
+      memset (state->s_r4u, 0, sizeof(state->s_r4u));
+      memset (state->audio_out_temp_bufR, 0, sizeof(state->audio_out_temp_bufR));
+      memset (state->s_r, 0, sizeof(state->s_r));
+      memset (state->s_ru, 0, sizeof(state->s_ru));
+    }
+    if (state->dmr_color_code != 16)
+      fprintf (stderr,"Sync: %sDMR %s| Color Code=%02d | VC1* [CC FILTER: %02d]\n", polarity, light, state->dmr_color_code, opts->dmr_cc_filter);
+    else fprintf (stderr,"Sync: %sDMR %s| Color Code=XX | VC1* [CC FILTER: %02d]\n", polarity, light, opts->dmr_cc_filter);
+    goto SKIP_BS_BOOT;
+  }
 
   if (state->currentslot == 0)
   {
@@ -1046,9 +1167,9 @@ void dmrBSBootstrap (dsd_opts * opts, dsd_state * state)
   cach_err = dmr_cach (opts, state, cachdata);
   if (opts->payload == 0) fprintf (stderr, "\n");
 
-  //update voice sync time for trunking purposes (particularly Con+)
-  if (opts->p25_is_tuned == 1) state->last_vc_sync_time = time(NULL);
+  //do not update last_cc_sync_time on VC1* (no EMB Color Code in voice sync burst); VC2..VC6 will update once EMB CC is verified
 
+  SKIP_BS_BOOT:
   //NOTE: Only play on slot 1, if slot 0, then it'll play after the next TDMA frame in the BS loop instead
   if (internalslot == 1 && opts->floating_point == 1 && opts->pulse_digi_rate_out == 8000)
     playSynthesizedVoiceFS3 (opts, state); //Float Stereo Mix 3v2
@@ -1066,29 +1187,6 @@ void dmrBSBootstrap (dsd_opts * opts, dsd_state * state)
     fprintf (stderr, "| VOICE CACH/SYNC ERR");
     fprintf (stderr, "%s", KNRM);
     fprintf (stderr, "\n");
-    //run refresh if either slot had an active MI in it.
-    if (state->payload_algid >= 0x21)
-    {
-      state->currentslot = 0;
-      dmr_alg_refresh (opts, state);
-    }
-    else if (state->payload_algid == 0x02)
-    {
-      state->currentslot = 0;
-      hytera_enhanced_alg_refresh(state);
-      dmr_alg_refresh (opts, state);
-    }
-    if (state->payload_algidR >= 0x21)
-    {
-      state->currentslot = 1;
-      dmr_alg_refresh (opts, state);
-    }
-    else if (state->payload_algidR == 0x02)
-    {
-      state->currentslot = 1;
-      hytera_enhanced_alg_refresh(state);
-      dmr_alg_refresh (opts, state);
-    }
 
     //failsafe to reset all data header and blocks when bad tact or emb
     dmr_reset_blocks (opts, state);

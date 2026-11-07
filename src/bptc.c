@@ -216,11 +216,10 @@ uint32_t BPTC_196x96_Extract_Data(uint8_t InputDeInteleavedData[196], uint8_t DM
       HammingIrrecoverableErrorNb++;
     }
 
-    /* Re-inject the line in the matrix (only the util data [11 bit],
-     * not the Hamming part [4 bit]) */
-    for(j = 0; j < 11; j++)
+    /* Re-inject the full line (including corrected parity bits) in the matrix */
+    for(j = 0; j < 15; j++)
     {
-      DataMatrix[i][j] = LineCorrected[j];
+      DataMatrix[i][j] = LineUncorrected[j];
     }
   }
 
@@ -235,17 +234,18 @@ uint32_t BPTC_196x96_Extract_Data(uint8_t InputDeInteleavedData[196], uint8_t DM
       ColumnUncorrected[j] = DataMatrix[j][i];
     }
 
-    /* Apply Hamming (15,11,3) code correction */
+    /* Apply Hamming (13,9,3) code correction */
     if(Hamming_13_9_decode(ColumnUncorrected, ColumnCorrected, 1) == false)
     {
       HammingIrrecoverableErrorNb++;
     }
-
-    /* Re-inject the column in the matrix (only the util data [11 bit],
-     * not the Hamming part [4 bit]) */
-    for(j = 0; j < 9; j++)
+    else
     {
-      DataMatrix[j][i] = ColumnCorrected[j];
+      /* Re-inject the full column (including corrected parity bits) in the matrix */
+      for(j = 0; j < 13; j++)
+      {
+        DataMatrix[j][i] = ColumnUncorrected[j];
+      }
     }
   }
 
@@ -274,16 +274,11 @@ uint32_t BPTC_196x96_Extract_Data(uint8_t InputDeInteleavedData[196], uint8_t DM
       /* Row/Line contains irrecoverable errors */
       HammingIrrecoverableErrorNb++;
     }
-    else
-    {
-      /* Row/Line contains correct data */
-    }
 
-    /* Re-inject the line in the matrix (only the util data [11 bit],
-     * not the Hamming part [4 bit]) */
-    for(j = 0; j < 11; j++)
+    /* Re-inject the full line (including corrected parity bits) in the matrix */
+    for(j = 0; j < 15; j++)
     {
-      DataMatrix[i][j] = LineCorrected[j];
+      DataMatrix[i][j] = LineUncorrected[j];
     }
   }
 
@@ -298,7 +293,7 @@ uint32_t BPTC_196x96_Extract_Data(uint8_t InputDeInteleavedData[196], uint8_t DM
       ColumnUncorrected[j] = DataMatrix[j][i];
     }
 
-    /* Apply Hamming (15,11,3) code correction */
+    /* Apply Hamming (13,9,3) code correction */
     if(Hamming_13_9_decode(ColumnUncorrected, ColumnCorrected, 1) == false)
     {
       /* Row/Line contains irrecoverable errors */
@@ -306,14 +301,60 @@ uint32_t BPTC_196x96_Extract_Data(uint8_t InputDeInteleavedData[196], uint8_t DM
     }
     else
     {
-      /* Row/Line contains correct data */
+      /* Re-inject the full column (including corrected parity bits) in the matrix */
+      for(j = 0; j < 13; j++)
+      {
+        DataMatrix[j][i] = ColumnUncorrected[j];
+      }
     }
+  }
 
-    /* Re-inject the column in the matrix (only the util data [11 bit],
-     * not the Hamming part [4 bit]) */
-    for(j = 0; j < 9; j++)
+  /* Verify that all rows (0..8) and columns (0..14) have converged to zero syndrome.
+   * Hamming_15_11_decode never returns false because all 15 non-zero 4-bit syndromes
+   * map to a bit flip, so without a post-pass consistency check a noisy burst can
+   * mis-correct data bits in Pass 2 Columns while still reporting 0 errors. */
+  for(i = 0; i < 9; i++)
+  {
+    for(j = 0; j < 15; j++)
     {
-      DataMatrix[j][i] = ColumnCorrected[j];
+      LineUncorrected[j] = DataMatrix[i][j];
+    }
+    if(Hamming_15_11_decode(LineUncorrected, LineCorrected, 1) == false)
+    {
+      HammingIrrecoverableErrorNb++;
+    }
+    else
+    {
+      for(j = 0; j < 15; j++)
+      {
+        if(LineUncorrected[j] != DataMatrix[i][j])
+        {
+          HammingIrrecoverableErrorNb++;
+          break;
+        }
+      }
+    }
+  }
+  for(i = 0; i < 15; i++)
+  {
+    for(j = 0; j < 13; j++)
+    {
+      ColumnUncorrected[j] = DataMatrix[j][i];
+    }
+    if(Hamming_13_9_decode(ColumnUncorrected, ColumnCorrected, 1) == false)
+    {
+      HammingIrrecoverableErrorNb++;
+    }
+    else
+    {
+      for(j = 0; j < 13; j++)
+      {
+        if(ColumnUncorrected[j] != DataMatrix[j][i])
+        {
+          HammingIrrecoverableErrorNb++;
+          break;
+        }
+      }
     }
   }
 

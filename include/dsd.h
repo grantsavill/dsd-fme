@@ -470,6 +470,7 @@ typedef struct
   //DMR Late Entry
   uint8_t dmr_le; //user option to turn on or turn off late entry for enc identifiers
 
+
   //Trunking - Use Group List as Allow List
   uint8_t trunk_use_allow_list;
 
@@ -1632,6 +1633,21 @@ int csvLCNImport(dsd_opts * opts, dsd_state * state);
 int csvChanImport(dsd_opts * opts, dsd_state * state);
 int csvKeyImportDec(dsd_opts * opts, dsd_state * state);
 int csvKeyImportHex(dsd_opts * opts, dsd_state * state);
+#ifdef __cplusplus
+extern "C" {
+#endif
+void trunk_init_access_code_lookup(dsd_opts * opts, dsd_state * state);
+void trunk_update_filter_for_freq(long int freq);
+long int trunk_get_current_freq(dsd_opts * opts, dsd_state * state);
+int trunk_get_t3_cc_lpcn(dsd_state * state);
+void trunk_set_t3_cc_lpcn(int lpcn);
+void trunk_set_t3_vc_lpcn(int lpcn);
+void trunk_set_cap_plus_cur_lsn(int lsn);
+void trunk_reset_dmr_channel_state(void);
+void trunk_get_dmr_channel_str(dsd_opts * opts, dsd_state * state, long int cur_freq, char * buf, size_t buf_sz);
+#ifdef __cplusplus
+}
+#endif
 
 //UDP Socket Connect and UDP Socket Blaster (audio output)
 int udp_socket_connect(dsd_opts * opts, dsd_state * state);

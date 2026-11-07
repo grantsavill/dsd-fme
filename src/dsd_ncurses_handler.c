@@ -41,7 +41,7 @@ uint8_t ncurses_input_handler(dsd_opts * opts, dsd_state * state, int c)
   {
     if (state->tg_hold == 0)
       state->tg_hold = state->lasttg;
-    else state->tg_hold = 0;
+    else { state->tg_hold = 0; if (opts->audio_out_type != 5) opts->slot_preference = 2; }
 
     if ( (opts->frame_nxdn48 == 1 || opts->frame_nxdn96 == 1) && (state->tg_hold == 0) )
       state->tg_hold = state->nxdn_last_tg;
@@ -54,8 +54,9 @@ uint8_t ncurses_input_handler(dsd_opts * opts, dsd_state * state, int c)
   {
     if (state->tg_hold == 0)
       state->tg_hold = state->lasttgR;
-    else state->tg_hold = 0;
+    else { state->tg_hold = 0; if (opts->audio_out_type != 5) opts->slot_preference = 2; }
   }
+
 
   //toggling when 48k/1 OSS still has some lag -- needed to clear out the buffer when switching
   if (c == 49) // '1' key, toggle slot1 on
@@ -89,8 +90,8 @@ uint8_t ncurses_input_handler(dsd_opts * opts, dsd_state * state, int c)
     //switching, but want to control each seperately plz
     if (opts->slot2_on == 1)
     {
-      opts->slot2_on = 0;
-      opts->slot_preference = 0; //slot 1
+      opts->slot2_on = 0; if (opts->slot_preference == 1) opts->slot_preference = 2;
+      // opts->slot_preference = 0; //slot 1
       //clear any previously buffered audio
       state->audio_out_float_buf_pR = state->audio_out_float_bufR + 100;
       state->audio_out_buf_pR = state->audio_out_bufR + 100;
@@ -166,6 +167,7 @@ uint8_t ncurses_input_handler(dsd_opts * opts, dsd_state * state, int c)
     if (opts->audio_gainA > 0)
       opts->audio_gainA--;
   }
+
 
   if (c == 122) //'z' key, toggle payload to console
   {
@@ -611,6 +613,7 @@ uint8_t ncurses_input_handler(dsd_opts * opts, dsd_state * state, int c)
     //dmr trunking/ncurses stuff
     state->dmr_rest_channel = -1; //init on -1
     state->dmr_mfid = -1; //
+    trunk_reset_dmr_channel_state();
 
     //dmr mfid branding and site parms
     sprintf(state->dmr_branding_sub, "%s", "");

@@ -159,67 +159,111 @@
    //end experimental conventional frequency scanner mode
  
    //tune back to last known CC when using trunking after x second hangtime
-   if (opts->p25_trunk == 1 && opts->p25_is_tuned == 1 && ( (time(NULL) - state->last_cc_sync_time) > opts->trunk_hangtime) )
+   if (opts->p25_trunk == 1 && (opts->p25_is_tuned == 1 || state->dmr_rest_channel != -1) && ( (time(NULL) - state->last_cc_sync_time) > opts->trunk_hangtime) )
    {
-     if (state->p25_cc_freq != 0)
+     //cap+ rest channel - update p25_cc_freq from dmr_rest_channel even if p25_cc_freq was 0
+     if (state->dmr_rest_channel != -1)
      {
- 
-       //cap+ rest channel - redundant?
-       if (state->dmr_rest_channel != -1)
+       if (state->trunk_chan_map[state->dmr_rest_channel] != 0)
        {
-         if (state->trunk_chan_map[state->dmr_rest_channel] != 0)
-         {
-           state->p25_cc_freq = state->trunk_chan_map[state->dmr_rest_channel];
-         }
-       }
- 
-       if (opts->use_rigctl == 1) //rigctl tuning
-       {
-         if (opts->setmod_bw != 0 ) SetModulation(opts->rigctl_sockfd, opts->setmod_bw);
-         SetFreq(opts->rigctl_sockfd, state->p25_cc_freq);
-         state->dmr_rest_channel = -1; //maybe?
-       }
-       //rtl
-       else if (opts->audio_in_type == 3)
-       {
-         #ifdef USE_RTLSDR
-         rtl_dev_tune (opts, state->p25_cc_freq);
-         state->dmr_rest_channel = -1;
-         #endif
-       }
- 
-       opts->p25_is_tuned = 0;
-       state->edacs_tuned_lcn = -1;
- 
-       state->last_cc_sync_time = time(NULL);
-       //test to switch back to 10/4 P1 QPSK for P25 FDMA CC
- 
-       //if P25p2 VCH and going back to P25p1 CC, flip symbolrate
-       if (state->p25_cc_is_tdma == 0) //is set on signal from P25 TSBK or MAC_SIGNAL
-       {
-         state->samplesPerSymbol = 10;
-         state->symbolCenter = 4;
-         //re-enable both slots
-         opts->slot1_on = 1;
-         opts->slot2_on = 1;
-       }
-       //if P25p1 SNDCP channel (or revert) and going to a P25 TDMA CC
-       else if (state->p25_cc_is_tdma == 1)
-       {
-         state->samplesPerSymbol = 8;
-         state->symbolCenter = 3;
-         //re-enable both slots (in case of late entry voice, MAC_SIGNAL can turn them back off)
-         opts->slot1_on = 1;
-         opts->slot2_on = 1;
+         state->p25_cc_freq = state->trunk_chan_map[state->dmr_rest_channel];
        }
      }
-     //zero out vc frequencies?
-     state->p25_vc_freq[0] = 0;
-     state->p25_vc_freq[1] = 0;
  
-     memset(state->active_channel, 0, sizeof(state->active_channel));
+     long int cur_freq = 0;
+     if (opts->use_rigctl == 1 && opts->rigctl_sockfd != 0)
+       cur_freq = GetCurrentFreq(opts->rigctl_sockfd);
+     else if (opts->audio_in_type == 3)
+       cur_freq = (long int)opts->rtlsdr_center_freq;
  
-     state->is_con_plus = 0; //flag off
+     //Cap+ idle rest channel bursts every ~3-4s with no carrier in between;
+     //if we are already parked on the rest channel frequency, wait for the next
+     //beacon burst before clearing dmr_rest_channel and triggering CC hunting
+     int cap_plus_rest_wait = 0;
+     if (state->dmr_rest_channel != -1 && state->p25_cc_freq != 0 && cur_freq == state->p25_cc_freq)
+     {
+       if ((time(NULL) - state->last_cc_sync_time) <= (opts->trunk_hangtime + 4))
+         cap_plus_rest_wait = 1;
+     }
+ 
+     if (!cap_plus_rest_wait)
+     {
+       if (state->p25_cc_freq != 0)
+       {
+ 
+         if (opts->use_rigctl == 1) //rigctl tuning
+         {
+           if (opts->setmod_bw != 0 ) SetModulation(opts->rigctl_sockfd, opts->setmod_bw);
+           if (cur_freq != state->p25_cc_freq)
+           {
+             SetFreq(opts->rigctl_sockfd, state->p25_cc_freq);
+           }
+           else
+           {
+             state->dmr_rest_channel = -1;
+           }
+         }
+         //rtl
+         else if (opts->audio_in_type == 3)
+         {
+           #ifdef USE_RTLSDR
+           if (cur_freq != state->p25_cc_freq)
+           {
+             rtl_dev_tune (opts, state->p25_cc_freq);
+           }
+           else
+           {
+             state->dmr_rest_channel = -1;
+           }
+           #endif
+         }
+         else
+         {
+           state->dmr_rest_channel = -1;
+         }
+ 
+         opts->p25_is_tuned = 0;
+         state->edacs_tuned_lcn = -1;
+ 
+         //only reset last_cc_sync_time if we actually tuned from a different frequency;
+         //if we were already on p25_cc_freq and hangtime expired, let getFrameSync hunt immediately
+         if (cur_freq != state->p25_cc_freq)
+           state->last_cc_sync_time = time(NULL);
+         //test to switch back to 10/4 P1 QPSK for P25 FDMA CC
+ 
+         //if P25p2 VCH and going back to P25p1 CC, flip symbolrate
+         if (state->p25_cc_is_tdma == 0) //is set on signal from P25 TSBK or MAC_SIGNAL
+         {
+           state->samplesPerSymbol = 10;
+           state->symbolCenter = 4;
+           //re-enable both slots
+           opts->slot1_on = 1;
+           opts->slot2_on = 1;
+         }
+         //if P25p1 SNDCP channel (or revert) and going to a P25 TDMA CC
+         else if (state->p25_cc_is_tdma == 1)
+         {
+           state->samplesPerSymbol = 8;
+           state->symbolCenter = 3;
+           //re-enable both slots (in case of late entry voice, MAC_SIGNAL can turn them back off)
+           opts->slot1_on = 1;
+           opts->slot2_on = 1;
+         }
+       }
+       else
+       {
+         state->dmr_rest_channel = -1;
+         opts->p25_is_tuned = 0;
+         state->edacs_tuned_lcn = -1;
+       }
+       //zero out vc frequencies?
+       state->p25_vc_freq[0] = 0;
+       state->p25_vc_freq[1] = 0;
+ 
+       memset(state->active_channel, 0, sizeof(state->active_channel));
+ 
+       state->is_con_plus = 0; //flag off
+     }
    }
  
    state->dibit_buf_p = state->dibit_buf + 200;
@@ -282,6 +326,7 @@
      sprintf(state->dmr_branding_sub, "%s", "");
      sprintf(state->dmr_branding, "%s", "");
      sprintf (state->dmr_site_parms, "%s", "");
+     state->dmr_is_ras = 0;
    }
  
    //The new event history should not require this, but revert if other random issues suddenly come up
@@ -808,11 +853,7 @@
    //slot preference is used during OSS audio playback to
    //prefer one tdma voice slot over another when both are playing back
    //this is a fix to OSS 48k/1 output
-   #ifdef __CYGWIN__
-   opts->slot_preference = 0; //default prefer slot 1 -- state->currentslot = 0;
-   #else
    opts->slot_preference = 2; //use 2 since integrating the Stereo Channel Patch;
-   #endif
    //hardset slots to synthesize
    opts->slot1_on = 1;
    opts->slot2_on = 1;
@@ -834,6 +875,7 @@
  
    //Use P25p1 heuristics
    opts->use_heuristics = 0;
+
  
  } //initopts
  
@@ -1766,6 +1808,12 @@
          {
            processFrame (opts, state);
  
+           if ((opts->p25_trunk == 1 || opts->scanner_mode == 1) && ((time(NULL) - state->last_cc_sync_time) > opts->trunk_hangtime))
+           {
+             state->synctype = -1;
+             break;
+           }
+ 
  #ifdef TRACE_DSD
            state->debug_prefix = 'S';
  #endif
@@ -2271,13 +2319,6 @@
            {
             state.K = 256;
            }
-           opts.dmr_mute_encL = 0;
-           opts.dmr_mute_encR = 0;
-           if (state.K == 0)
-           {
-             opts.dmr_mute_encL = 1;
-             opts.dmr_mute_encR = 1;
-           }
            break;
  
          case 'R':
@@ -2310,13 +2351,6 @@
             state.K3 = strtoull (pEnd, &pEnd, 16);
             state.K4 = strtoull (pEnd, &pEnd, 16);
             fprintf (stderr, "Hytera40/128/256 BP or AES128/256 Key = %016llX %016llX %016llX %016llX\n", state.K1, state.K2, state.K3, state.K4);
-            opts.dmr_mute_encL = 0;
-            opts.dmr_mute_encR = 0;
-            if (state.K1 == 0 && state.K2 == 0 && state.K3 == 0 && state.K4 == 0)
-            {
-              opts.dmr_mute_encL = 1;
-              opts.dmr_mute_encR = 1;
-            }
             state.H = state.K1; //shim still required?
             //load the AES keys into a seperate handler
             state.A1[0] = state.A1[1] = state.K1;
@@ -3426,6 +3460,7 @@
        //string yeet
        parse_pulse_input_string(&opts, opts.audio_in_dev+5);
      }
+
  
      //UDP Socket Blaster Audio Output Setup
      if((strncmp(opts.audio_out_dev, "udp", 3) == 0))
