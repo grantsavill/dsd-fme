@@ -1493,6 +1493,8 @@
    printf ("\n");
    printf ("Device Options:\n");
    printf ("  -O            List All Pulse Audio Input Sources and Output Sinks (devices).\n");
+   printf ("  AMBE_PORT     Env var to select AMBE3000/AMBE3003 serial port (e.g. COM4,\n");
+   printf ("                /dev/ttyUSB0, or 'none' to disable auto-detection; 'x' toggles in -N).\n");
    printf ("\n");
    printf ("Input/Output options:\n");
    #ifdef __CYGWIN__
@@ -1775,8 +1777,16 @@
    }
    else if (opts->audio_gain == 0)
    {
-     state->aout_gain  = 15.0f;
-     state->aout_gainR = 15.0f;
+     if (ambe_hw_is_active())
+     {
+       state->aout_gain  = 25.0f;
+       state->aout_gainR = 25.0f;
+     }
+     else
+     {
+       state->aout_gain  = 15.0f;
+       state->aout_gainR = 15.0f;
+     }
    }
  
  #ifdef USE_RTLSDR
@@ -1971,6 +1981,7 @@
    if (opts->mbe_out_fR != NULL) closeMbeOutFileR (opts, state);
  
    fprintf (stderr,"\n");
+   ambe_hw_close();
    fprintf (stderr,"Total audio errors: %i\n", state->debug_audio_errors);
    fprintf (stderr,"Total header errors: %i\n", state->debug_header_errors);
    fprintf (stderr,"Total irrecoverable header errors: %i\n", state->debug_header_critical_errors);
@@ -3826,6 +3837,7 @@
  
      signal(SIGINT, handler);
      signal(SIGTERM, handler);
+     ambe_hw_init(&opts, &state);
  
      if (opts.playfiles == 1)
      {

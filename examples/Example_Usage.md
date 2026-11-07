@@ -243,6 +243,7 @@ G - Manually increase RTL gain
 0 - Lock/Unlock DMR Color Code, NXDN RAN, or P25 NAC filter on current active signal
 . - Increment DMR Color Code (0-15), NXDN RAN (0-63), or P25 NAC (000-FFF) filter
 , - Decrement DMR Color Code (0-15), NXDN RAN (0-63), or P25 NAC (000-FFF) filter
+x - Toggle AMBE3000/AMBE3003 hardware vocoder / MBElib software fallback
 
 ```
 

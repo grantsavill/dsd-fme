@@ -219,7 +219,9 @@ uint8_t ncurses_input_handler(dsd_opts * opts, dsd_state * state, int c)
   if (c == 43) //+ key, increment audio_gain
   {
 
-    if (opts->audio_gain < 50)
+    if (opts->audio_gain == 0 && ambe_hw_is_active())
+      opts->audio_gain = 26;
+    else if (opts->audio_gain < 50)
       opts->audio_gain++;
 
     state->aout_gain = opts->audio_gain;
@@ -232,7 +234,9 @@ uint8_t ncurses_input_handler(dsd_opts * opts, dsd_state * state, int c)
   if (c == 45) //- key, decrement audio_gain
   {
 
-    if (opts->audio_gain > 0)
+    if (opts->audio_gain == 0 && ambe_hw_is_active())
+      opts->audio_gain = 24;
+    else if (opts->audio_gain > 0)
       opts->audio_gain--;
 
     state->aout_gain = opts->audio_gain;
@@ -261,6 +265,10 @@ uint8_t ncurses_input_handler(dsd_opts * opts, dsd_state * state, int c)
       opts->audio_gainA--;
   }
 
+  if (c == 120) //'x' key, toggle AMBE hardware vocoder / reconnect
+  {
+    ambe_hw_toggle(opts, state);
+  }
 
   if (c == 122) //'z' key, toggle payload to console
   {

@@ -54,6 +54,7 @@
 
 #include <math.h>
 #include <mbelib.h>
+#include "ambe_hw.h"
 #include <sndfile.h>
 
 #include "p25p1_heuristics.h"

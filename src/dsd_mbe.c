@@ -582,7 +582,7 @@ processMbeFrame (dsd_opts * opts, dsd_state * state, char imbe_fr[8][23], char a
       //EXPERIMENTAL!!
       //load basic privacy key number from array by the tg value (if not forced)
       //currently only Moto BP and Hytera 10 Char BP
-      if (state->forced_alg_id == 0 && state->payload_algid == 0)
+      if (state->forced_alg_id == 0 && state->payload_algid == 0 && state->keyloader == 0)
       {
         //see if we need to hash a value larger than 16-bits
         hash = state->lasttg & 0xFFFFFF;
@@ -608,7 +608,6 @@ processMbeFrame (dsd_opts * opts, dsd_state * state, char imbe_fr[8][23], char a
           state->K = state->rkey_array[hash] & 0xFF; //doesn't exceed 255
           #endif
           state->K1 = state->H = state->rkey_array[hash] & 0xFFFFFFFFFF; //doesn't exceed 40-bit limit
-          opts->dmr_mute_encL = 0;
           // fprintf (stderr, "Key: %X ", state->rkey_array[hash]);
         }
         // else opts->dmr_mute_encL = 1; //may cause issues for manual key entry (non-csv)
@@ -637,7 +636,6 @@ processMbeFrame (dsd_opts * opts, dsd_state * state, char imbe_fr[8][23], char a
               ambe_d[i] ^= (char)state->static_ks_bits[0][i];
           }
         }
-        opts->dmr_mute_encL = 0; //shim to unmute
       }
 
       //Hytera BP //TODO: Clean this mess up
@@ -724,7 +722,7 @@ processMbeFrame (dsd_opts * opts, dsd_state * state, char imbe_fr[8][23], char a
       }
 
       //DMR and P25p2 DES-OFB 56 Handling, Slot 1, VCH 0 -- consider moving into the AES handler
-      if ( (state->currentslot == 0 && state->payload_algid == 0x22 && state->R != 0) ||
+      if ( (state->currentslot == 0 && state->payload_algid == 0x22 && state->R != 0 && state->payload_mi != 0 && state->payload_miP != 0) ||
            (state->currentslot == 0 && state->payload_algid == 0x81 && state->R != 0)   )
       {
 
@@ -775,13 +773,13 @@ processMbeFrame (dsd_opts * opts, dsd_state * state, char imbe_fr[8][23], char a
       }
 
       //DMR and P25p2 AES 256, Slot 1, VCH 0 -- need a way to make sure we have a key when zero fill on some parts of it //&& state->aes_key_loaded[0] == 1
-      if (  (state->currentslot == 0 && state->payload_algid == 0x24 && state->aes_key_loaded[0] == 1 ) || //DMR AES128
-            (state->currentslot == 0 && state->payload_algid == 0x25 && state->aes_key_loaded[0] == 1 ) || //DMR AES256
+      if (  (state->currentslot == 0 && state->payload_algid == 0x24 && state->aes_key_loaded[0] == 1 && state->payload_mi != 0 ) || //DMR AES128
+            (state->currentslot == 0 && state->payload_algid == 0x25 && state->aes_key_loaded[0] == 1 && state->payload_mi != 0 ) || //DMR AES256
             (state->currentslot == 0 && state->payload_algid == 0x89 && state->aes_key_loaded[0] == 1 ) || //P25 AES128
             (state->currentslot == 0 && state->payload_algid == 0x84 && state->aes_key_loaded[0] == 1 ) || //P25 AES256
             (state->currentslot == 0 && state->payload_algid >= 0x31 && \
-                                        state->payload_algid <= 0x3A && state->aes_key_loaded[0] == 1 ) || //KIRI Any
-            (state->currentslot == 0 && state->payload_algid == 0x02 && state->R != 0 )                  ) //HYT ENHANCED
+                                        state->payload_algid <= 0x3A && state->aes_key_loaded[0] == 1 && state->payload_mi != 0 ) || //KIRI Any
+            (state->currentslot == 0 && state->payload_algid == 0x02 && state->R != 0 && state->payload_mi != 0 )                  ) //HYT ENHANCED
       {
 
         int j; int z = 0; int n = 16; uint8_t b = 0; //n=16 for AES-OFB discard round
@@ -850,12 +848,10 @@ processMbeFrame (dsd_opts * opts, dsd_state * state, char imbe_fr[8][23], char a
         //increment vc counter by one
         state->DMRvcL++;
 
-        opts->dmr_mute_encL = 0; //shim to unmute
-
       }
 
       //DMR RC4, Slot 1
-      if (state->currentslot == 0 && state->payload_algid == 0x21 && state->R != 0)
+      if (state->currentslot == 0 && state->payload_algid == 0x21 && state->R != 0 && state->payload_mi != 0)
       {
         uint8_t cipher[7] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
         uint8_t plain[7]  = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
@@ -1082,7 +1078,7 @@ processMbeFrame (dsd_opts * opts, dsd_state * state, char imbe_fr[8][23], char a
       //EXPERIMENTAL!!
       //load basic privacy key number from array by the tg value (if not forced)
       //currently only Moto BP and Hytera 10 Char BP
-      if (state->forced_alg_id == 0 && state->payload_algidR == 0)
+      if (state->forced_alg_id == 0 && state->payload_algidR == 0 && state->keyloader == 0)
       {
         //see if we need to hash a value larger than 16-bits
         hash = state->lasttgR & 0xFFFFFF;
@@ -1108,7 +1104,6 @@ processMbeFrame (dsd_opts * opts, dsd_state * state, char imbe_fr[8][23], char a
           state->K = state->rkey_array[hash] & 0xFF; //doesn't exceed 255
           #endif
           state->K1 = state->H = state->rkey_array[hash] & 0xFFFFFFFFFF; //doesn't exceed 40-bit limit
-          opts->dmr_mute_encR = 0;
           // fprintf (stderr, "Key: %X ", state->rkey_array[hash]);
         }
         // else opts->dmr_mute_encR = 1; //may cause issues for manual key entry (non-csv)
@@ -1137,7 +1132,6 @@ processMbeFrame (dsd_opts * opts, dsd_state * state, char imbe_fr[8][23], char a
               ambe_d[i] ^= (char)state->static_ks_bits[1][i];
           }
         }
-        opts->dmr_mute_encR = 0; //shim to unmute
       }
 
       //Hytera BP //TODO: Clean this mess up
@@ -1224,7 +1218,7 @@ processMbeFrame (dsd_opts * opts, dsd_state * state, char imbe_fr[8][23], char a
       }
 
       //DMR and P25p2 DES-OFB 56 Handling, Slot 2, VCH 1 -- Consider moving into AES handler
-      if ( (state->currentslot == 1 && state->payload_algidR == 0x22 && state->RR != 0) ||
+      if ( (state->currentslot == 1 && state->payload_algidR == 0x22 && state->RR != 0 && state->payload_miR != 0 && state->payload_miN != 0) ||
            (state->currentslot == 1 && state->payload_algidR == 0x81 && state->RR != 0)   )
       {
 
@@ -1275,13 +1269,13 @@ processMbeFrame (dsd_opts * opts, dsd_state * state, char imbe_fr[8][23], char a
       }
 
       //DMR and P25p2 AES, Slot 2, VCH 1
-      if (  (state->currentslot == 1 && state->payload_algidR == 0x24 && state->aes_key_loaded[1] == 1 ) || //DMR AES128
-            (state->currentslot == 1 && state->payload_algidR == 0x25 && state->aes_key_loaded[1] == 1 ) || //DMR AES256
+      if (  (state->currentslot == 1 && state->payload_algidR == 0x24 && state->aes_key_loaded[1] == 1 && state->payload_miR != 0 ) || //DMR AES128
+            (state->currentslot == 1 && state->payload_algidR == 0x25 && state->aes_key_loaded[1] == 1 && state->payload_miR != 0 ) || //DMR AES256
             (state->currentslot == 1 && state->payload_algidR == 0x89 && state->aes_key_loaded[1] == 1 ) || //P25 AES128
             (state->currentslot == 1 && state->payload_algidR == 0x84 && state->aes_key_loaded[1] == 1 ) || //P25 AES256
             (state->currentslot == 1 && state->payload_algidR >= 0x31 && \
-                                        state->payload_algidR <= 0x3A && state->aes_key_loaded[1] == 1 ) || //KIRI Any
-            (state->currentslot == 1 && state->payload_algidR == 0x02 && state->RR != 0 )                 ) //HYT ENHANCED
+                                        state->payload_algidR <= 0x3A && state->aes_key_loaded[1] == 1 && state->payload_miR != 0 ) || //KIRI Any
+            (state->currentslot == 1 && state->payload_algidR == 0x02 && state->RR != 0 && state->payload_miR != 0 )                 ) //HYT ENHANCED
       {
 
         int j; int z = 0; int n = 16; uint8_t b = 0; //n=16 for AES-OFB discard round
@@ -1350,12 +1344,10 @@ processMbeFrame (dsd_opts * opts, dsd_state * state, char imbe_fr[8][23], char a
         //increment vc counter by one
         state->DMRvcR++;
 
-        opts->dmr_mute_encR = 0; //shim to unmute
-
       }
 
       //DMR RC4, Slot 2
-      if (state->currentslot == 1 && state->payload_algidR == 0x21 && state->RR != 0)
+      if (state->currentslot == 1 && state->payload_algidR == 0x21 && state->RR != 0 && state->payload_miR != 0)
       {
         uint8_t cipher[7] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
         uint8_t plain[7]  = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
@@ -1592,6 +1584,9 @@ processMbeFrame (dsd_opts * opts, dsd_state * state, char imbe_fr[8][23], char a
     //check for available R key
     if (state->R != 0) state->dmr_encL = 0;
 
+    if ((state->payload_algid == 0x84 || state->payload_algid == 0x89) && state->aes_key_loaded[0] == 1)
+      state->dmr_encL = 0;
+
     //second checkdown for P25p2 WACN, SYSID, and CC set
     if (state->synctype == 35 || state->synctype == 36)
     {
@@ -1606,6 +1601,9 @@ processMbeFrame (dsd_opts * opts, dsd_state * state, char imbe_fr[8][23], char a
 
     if (state->payload_algid == 0x26 && state->straight_ks == 0x26)
       state->dmr_encL = 0;
+
+    if (ambe_fr != NULL && opts->reverse_mute == 0)
+      state->dmr_encL = ambe_hw_was_frame_muted(0);
 
     //reverse mute testing, only mute unencrypted traffic (slave piggyback dsd+ method)
     if (opts->reverse_mute == 1)
@@ -1675,6 +1673,9 @@ processMbeFrame (dsd_opts * opts, dsd_state * state, char imbe_fr[8][23], char a
     //check for available RR key
     if (state->RR != 0) state->dmr_encR = 0;
 
+    if ((state->payload_algidR == 0x84 || state->payload_algidR == 0x89) && state->aes_key_loaded[1] == 1)
+      state->dmr_encR = 0;
+
     //second checkdown for P25p2 WACN, SYSID, and CC set
     if (state->synctype == 35 || state->synctype == 36)
     {
@@ -1689,6 +1690,9 @@ processMbeFrame (dsd_opts * opts, dsd_state * state, char imbe_fr[8][23], char a
 
     if (state->payload_algidR == 0x26 && state->straight_ks == 0x26)
       state->dmr_encR = 0;
+
+    if (ambe_fr != NULL && opts->reverse_mute == 0)
+      state->dmr_encR = ambe_hw_was_frame_muted(1);
 
     //reverse mute testing, only mute unencrypted traffic (slave piggyback dsd+ method)
     if (opts->reverse_mute == 1)

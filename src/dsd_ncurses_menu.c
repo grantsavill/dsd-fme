@@ -30,7 +30,7 @@ int starty = 0;
 
 char *choicesc[] = {
   "Return",
-  "      ", //Save Decoded Audio WAV (Legacy Mode) //Disabled
+  "Toggle/Reconnect AMBE",
   "Save Signal to Symbol Capture Bin",
   "Toggle Muting Encrypted Traffic    ",
   "Save Per Call Decoded WAV",
@@ -293,6 +293,11 @@ void ncursesMenu (dsd_opts * opts, dsd_state * state)
         //   }
         //   openWavOutFile (opts, state);
         // }
+        if (choicec == 2)
+        {
+          ambe_hw_toggle(opts, state);
+          choicec = 18;
+        }
         if (choicec == 3)
         {
           //read in filename for symbol capture bin

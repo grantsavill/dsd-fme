@@ -398,7 +398,8 @@ processFrame (dsd_opts * opts, dsd_state * state)
               // NAC fixed by error correction
               state->nac = new_nac;
               //apparently, both 0 and 0xFFF can the BCH code on signal drop
-              if (state->p2_hardset == 0 && new_nac != 0 && new_nac != 0xFFF)
+              if (state->p2_hardset == 0 && new_nac != 0 && new_nac != 0xFFF &&
+                  (opts->p25_nac_filter < 0 || opts->p25_nac_filter > 0xFFF || new_nac == opts->p25_nac_filter))
               {
                 state->p2_cc = new_nac;
               }
@@ -417,6 +418,23 @@ processFrame (dsd_opts * opts, dsd_state * state)
           duid[0] = 'E';
           duid[1] = 'E';
           state->debug_header_critical_errors++;
+      }
+
+      //P25 NAC Filter: ignore non-matching NACs
+      if (check_result && opts->p25_nac_filter >= 0 && opts->p25_nac_filter <= 0xFFF &&
+          state->nac != opts->p25_nac_filter)
+      {
+          if (opts->errorbars == 1)
+          {
+              printFrameInfo (opts, state);
+              fprintf (stderr, " [NAC FILTER: %03X]\n", opts->p25_nac_filter);
+          }
+          memset (state->audio_out_temp_buf, 0, sizeof(state->audio_out_temp_buf));
+          memset (state->s_l, 0, sizeof(state->s_l));
+          memset (state->s_lu, 0, sizeof(state->s_lu));
+          state->lastp25type = 0;
+          sprintf (state->fsubtype, "              ");
+          return;
       }
     }
 

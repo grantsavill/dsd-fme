@@ -261,6 +261,11 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
     printw ("\n");
   }
 
+  if (opts->audio_gain == 0 && ambe_hw_is_active())
+  {
+    state->aout_gain  = 25.0f;
+    state->aout_gainR = 25.0f;
+  }
 
   if (opts->audio_out_type == 0 && opts->analog_only == 0)
   {
@@ -572,6 +577,7 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
   else printw ( "[%d] \n", (48000*opts->wav_interpolator)/state->samplesPerSymbol);
   printw ("| Decoding:    [%s]", opts->output_name);
   if (opts->frame_tetra == 1) printw ("[%s]", tetra_voice_codec_available() ? "ACELP" : "Data Only");
+  else if (opts->frame_m17 == 0 && opts->analog_only == 0) printw ("[%s]", ambe_hw_status_str());
   if (opts->aggressive_framesync == 0) printw ("[CRC/(RAS)]");
   if (opts->dmr_cc_filter >= 0 && opts->dmr_cc_filter <= 15 && opts->frame_dmr == 1) printw ("[DCC Filter: %02d]", opts->dmr_cc_filter);
   if (opts->nxdn_ran_filter >= 0 && opts->nxdn_ran_filter <= 63 && (opts->frame_nxdn48 == 1 || opts->frame_nxdn96 == 1)) printw ("[RAN Filter: %02d]", opts->nxdn_ran_filter);
@@ -585,22 +591,33 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
 
   if (opts->dmr_stereo == 0 && opts->frame_tetra == 0)
   {
-    printw ("| Voice Error: [%X][%X]", state->errs&0xF, state->errs2&0xF);
+    float ber0 = ambe_hw_get_slot_ber(0);
+    const char *st0 = ambe_hw_slot_status_str(0);
+    printw ("| Voice Error: [%X][%X] (%.1f%%)", state->errs&0xF, state->errs2&0xF, ber0);
     if (opts->slot1_on == 0) printw (" OFF");
     if (opts->slot1_on == 1) printw (" ON");
+    if (st0[0] != 0) printw (" %s", st0);
     printw ("\n");
   }
 
   if (opts->dmr_stereo == 1 && opts->frame_tetra == 0)
   {
-    printw ("| Voice Error: [%X][%X] Slot 1 (1)", state->errs&0xF, state->errs2&0xF);
+    float ber0 = ambe_hw_get_slot_ber(0);
+    float ber1 = ambe_hw_get_slot_ber(1);
+    const char *st0 = ambe_hw_slot_status_str(0);
+    const char *st1 = ambe_hw_slot_status_str(1);
+
+    printw ("| Voice Error: [%X][%X] (%.1f%%) Slot 1 (1)", state->errs&0xF, state->errs2&0xF, ber0);
     if (opts->slot1_on == 0) printw (" OFF");
     if (opts->slot1_on == 1) printw (" ON");
+    if (st0[0] != 0) printw (" %s", st0);
     if (opts->slot_preference == 0) printw (" *Preferred (3)");
     printw ("\n");
-    printw ("| Voice Error: [%X][%X] Slot 2 (2)", state->errsR&0xF, state->errs2R&0xF);
+
+    printw ("| Voice Error: [%X][%X] (%.1f%%) Slot 2 (2)", state->errsR&0xF, state->errs2R&0xF, ber1);
     if (opts->slot2_on == 0) printw (" OFF");
     if (opts->slot2_on == 1) printw (" ON");
+    if (st1[0] != 0) printw (" %s", st1);
     if (opts->slot_preference == 1) printw (" *Preferred (3)");
     printw ("\n");
   }
