@@ -68,6 +68,13 @@ void NXDN_SACCH_Full_decode(dsd_opts * opts, dsd_state * state)
 
 void NXDN_Elements_Content_decode(dsd_opts * opts, dsd_state * state, uint8_t CrcCorrect, uint8_t * ElementsContent)
 {
+  //NXDN RAN Filter: ignore non-matching RANs
+  if (opts->nxdn_ran_filter >= 0 && opts->nxdn_ran_filter <= 63 &&
+      (int)state->nxdn_last_ran != opts->nxdn_ran_filter)
+  {
+    fprintf (stderr, " [RAN FILTER: %02d]", opts->nxdn_ran_filter);
+    return;
+  }
 
   //Including Flags on bit 0 and bit 1 for more precise usage below
   uint8_t MessageType = (uint8_t)convert_bits_into_output(ElementsContent+0, 8);
@@ -1815,6 +1822,14 @@ void NXDN_decode_scch(dsd_opts * opts, dsd_state * state, uint8_t * Message, uin
   // if (state->nxdn_last_ran == -1)          state->nxdn_last_ran = 99;
 
   state->nxdn_last_ran = area;
+
+  //NXDN RAN/Area Filter: ignore non-matching Area on IDAS SCCH
+  if (opts->nxdn_ran_filter >= 0 && opts->nxdn_ran_filter <= 63 &&
+      (int)state->nxdn_last_ran != opts->nxdn_ran_filter)
+  {
+    fprintf (stderr, " [RAN FILTER: %02d]", opts->nxdn_ran_filter);
+    return;
+  }
 
   state->last_cc_sync_time = time(NULL);
 

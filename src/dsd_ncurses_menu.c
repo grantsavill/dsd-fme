@@ -69,6 +69,7 @@ char *choices[] = {
   "Manually Set p2 Parameters", //16
   "Input & Output Options",
   "LRRP Data to File",
+  "CC / RAN / NAC Filter",
   "Exit DSD-FME",
   };
 
@@ -1566,11 +1567,87 @@ void ncursesMenu (dsd_opts * opts, dsd_state * state)
     }
     if (choice == 20)
     {
+      int ftype = 0;
+      entry_win = newwin(10, WIDTH+18, starty+10, startx+10);
+      box (entry_win, 0, 0);
+      mvwprintw(entry_win, 2, 2, " Select Access Code Filter Type");
+      mvwprintw(entry_win, 3, 2, " 1 - DMR Color Code (0-15 dec)");
+      mvwprintw(entry_win, 4, 2, " 2 - NXDN RAN / Area (0-63 dec)");
+      mvwprintw(entry_win, 5, 2, " 3 - P25 NAC (000-FFF hex)");
+      mvwprintw(entry_win, 6, 2, " 4 - Disable All Filters");
+      mvwprintw(entry_win, 7, 3, " ");
+      echo();
+      refresh();
+      wscanw(entry_win, "%d", &ftype);
+      noecho();
+
+      if (ftype == 1)
+      {
+        int cc_input = -1;
+        entry_win = newwin(7, WIDTH+18, starty+10, startx+10);
+        box (entry_win, 0, 0);
+        mvwprintw(entry_win, 2, 2, " Enter DMR Color Code Filter (0-15)");
+        mvwprintw(entry_win, 3, 2, " (Enter -1 or 16 to Disable Filter)");
+        mvwprintw(entry_win, 4, 3, " ");
+        echo();
+        refresh();
+        wscanw(entry_win, "%d", &cc_input);
+        noecho();
+        if (cc_input >= 0 && cc_input <= 15)
+          opts->dmr_cc_filter = cc_input;
+        else
+          opts->dmr_cc_filter = -1;
+      }
+      else if (ftype == 2)
+      {
+        int ran_input = -1;
+        entry_win = newwin(7, WIDTH+18, starty+10, startx+10);
+        box (entry_win, 0, 0);
+        mvwprintw(entry_win, 2, 2, " Enter NXDN RAN Filter (0-63)");
+        mvwprintw(entry_win, 3, 2, " (Enter -1 or 64 to Disable Filter)");
+        mvwprintw(entry_win, 4, 3, " ");
+        echo();
+        refresh();
+        wscanw(entry_win, "%d", &ran_input);
+        noecho();
+        if (ran_input >= 0 && ran_input <= 63)
+          opts->nxdn_ran_filter = ran_input;
+        else
+          opts->nxdn_ran_filter = -1;
+      }
+      else if (ftype == 3)
+      {
+        char nac_buf[16];
+        memset(nac_buf, 0, sizeof(nac_buf));
+        int nac_input = -1;
+        entry_win = newwin(7, WIDTH+18, starty+10, startx+10);
+        box (entry_win, 0, 0);
+        mvwprintw(entry_win, 2, 2, " Enter P25 NAC Filter in Hex (000-FFF)");
+        mvwprintw(entry_win, 3, 2, " (Enter -1 to Disable Filter)");
+        mvwprintw(entry_win, 4, 3, " ");
+        echo();
+        refresh();
+        wscanw(entry_win, "%15s", nac_buf);
+        noecho();
+        if (strcmp(nac_buf, "-1") != 0 && sscanf(nac_buf, "%x", &nac_input) == 1 && nac_input >= 0 && nac_input <= 0xFFF)
+          opts->p25_nac_filter = nac_input;
+        else
+          opts->p25_nac_filter = -1;
+      }
+      else if (ftype == 4)
+      {
+        opts->dmr_cc_filter = -1;
+        opts->nxdn_ran_filter = -1;
+        opts->p25_nac_filter = -1;
+      }
+    }
+    if (choice == 21)
+    {
       exitflag = 1;
       break;
     }
 
-		if(choice != 0 && choice != 20)	/* User did a choice come out of the infinite loop */
+		if(choice != 0 && choice != 21)	/* User did a choice come out of the infinite loop */
 			break;
 
 	}

@@ -57,6 +57,84 @@ uint8_t ncurses_input_handler(dsd_opts * opts, dsd_state * state, int c)
     else { state->tg_hold = 0; if (opts->audio_out_type != 5) opts->slot_preference = 2; }
   }
 
+  if (c == 48) //'0' key, toggle DMR Color Code / NXDN RAN / P25 NAC filter on current value or clear
+  {
+    int lls = state->lastsynctype;
+    if (lls == 28 || lls == 29 || ((opts->frame_nxdn48 == 1 || opts->frame_nxdn96 == 1) && opts->frame_dmr == 0 && opts->frame_p25p1 == 0 && opts->frame_p25p2 == 0))
+    {
+      if (opts->nxdn_ran_filter == -1)
+      {
+        if (state->nxdn_last_ran >= 0 && state->nxdn_last_ran <= 63)
+          opts->nxdn_ran_filter = state->nxdn_last_ran;
+      }
+      else opts->nxdn_ran_filter = -1;
+    }
+    else if (lls == 0 || lls == 1 || lls == 35 || lls == 36 || ((opts->frame_p25p1 == 1 || opts->frame_p25p2 == 1) && opts->frame_dmr == 0))
+    {
+      if (opts->p25_nac_filter == -1)
+      {
+        int nac = (lls == 35 || lls == 36 || state->nac == 0) ? state->p2_cc : state->nac;
+        if (nac >= 0 && nac <= 0xFFF)
+          opts->p25_nac_filter = nac;
+      }
+      else opts->p25_nac_filter = -1;
+    }
+    else
+    {
+      if (opts->dmr_cc_filter == -1)
+      {
+        if (state->dmr_color_code <= 15)
+          opts->dmr_cc_filter = state->dmr_color_code;
+      }
+      else opts->dmr_cc_filter = -1;
+    }
+  }
+
+  if (c == 46) //'.' key, cycle DMR Color Code / NXDN RAN / P25 NAC filter forward (-1 -> 0..max -> -1)
+  {
+    int lls = state->lastsynctype;
+    if (lls == 28 || lls == 29 || ((opts->frame_nxdn48 == 1 || opts->frame_nxdn96 == 1) && opts->frame_dmr == 0 && opts->frame_p25p1 == 0 && opts->frame_p25p2 == 0))
+    {
+      if (opts->nxdn_ran_filter < 63)
+        opts->nxdn_ran_filter++;
+      else opts->nxdn_ran_filter = -1;
+    }
+    else if (lls == 0 || lls == 1 || lls == 35 || lls == 36 || ((opts->frame_p25p1 == 1 || opts->frame_p25p2 == 1) && opts->frame_dmr == 0))
+    {
+      if (opts->p25_nac_filter < 0xFFF)
+        opts->p25_nac_filter++;
+      else opts->p25_nac_filter = -1;
+    }
+    else
+    {
+      if (opts->dmr_cc_filter < 15)
+        opts->dmr_cc_filter++;
+      else opts->dmr_cc_filter = -1;
+    }
+  }
+
+  if (c == 44) //',' key, cycle DMR Color Code / NXDN RAN / P25 NAC filter backward (-1 -> max..0 -> -1)
+  {
+    int lls = state->lastsynctype;
+    if (lls == 28 || lls == 29 || ((opts->frame_nxdn48 == 1 || opts->frame_nxdn96 == 1) && opts->frame_dmr == 0 && opts->frame_p25p1 == 0 && opts->frame_p25p2 == 0))
+    {
+      if (opts->nxdn_ran_filter == -1)
+        opts->nxdn_ran_filter = 63;
+      else opts->nxdn_ran_filter--;
+    }
+    else if (lls == 0 || lls == 1 || lls == 35 || lls == 36 || ((opts->frame_p25p1 == 1 || opts->frame_p25p2 == 1) && opts->frame_dmr == 0))
+    {
+      if (opts->p25_nac_filter == -1)
+        opts->p25_nac_filter = 0xFFF;
+      else opts->p25_nac_filter--;
+    }
+    else
+    {
+      if (opts->dmr_cc_filter == -1)
+        opts->dmr_cc_filter = 15;
+      else opts->dmr_cc_filter--;
+    }
+  }
 
   //toggling when 48k/1 OSS still has some lag -- needed to clear out the buffer when switching
   if (c == 49) // '1' key, toggle slot1 on
@@ -699,7 +777,11 @@ uint8_t ncurses_input_handler(dsd_opts * opts, dsd_state * state, int c)
     //use same or last specified host for TCP audio sink for connection
     memcpy (opts->rigctlhostname, opts->tcp_hostname, sizeof (opts->rigctlhostname) );
     opts->rigctl_sockfd = Connect(opts->rigctlhostname, opts->rigctlportno);
-    if (opts->rigctl_sockfd != 0) opts->use_rigctl = 1;
+    if (opts->rigctl_sockfd != 0)
+    {
+      opts->use_rigctl = 1;
+      trunk_init_access_code_lookup(opts, state);
+    }
     else opts->use_rigctl = 0;
   }
 

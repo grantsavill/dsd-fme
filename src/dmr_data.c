@@ -269,10 +269,27 @@ dmr_data_sync (dsd_opts * opts, dsd_state * state)
   //not sure why I still have two variables for this, need to look and see what state->color_code still ties into
   if (SlotTypeOk == 1) state->dmr_color_code = state->color_code;
 
+  if (opts->dmr_cc_filter >= 0 && opts->dmr_cc_filter <= 15 && (int)state->color_code != opts->dmr_cc_filter)
+  {
+    for (i = 0; i < 49; i++)
+    {
+      if (state->dmr_stereo == 0)
+      {
+        dibit = getDibit(opts, state);
+        state->dmr_stereo_payload[i+95] = dibit;
+      }
+    }
+    fprintf (stderr, "| Color Code=%02d [CC FILTER: %02d]\n", state->color_code, opts->dmr_cc_filter);
+    goto END;
+  }
+
+  state->last_cc_sync_time = time(NULL);
+
   /* Reconstitute the burst type */
   burst = (uint8_t)((SlotType[4] << 3) + (SlotType[5] << 2) + (SlotType[6] << 1) + SlotType[7]);
   if (state->currentslot == 0) state->dmrburstL = burst;
   if (state->currentslot == 1) state->dmrburstR = burst;
+  if (burst == 0x09) ambe_hw_reset_slot(state->currentslot);
 
 
   // Current slot - Second Half - Data Payload - 2nd part

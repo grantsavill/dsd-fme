@@ -88,15 +88,15 @@ Decoder options:
   -fa           Auto Detection
   -fA           Passive Analog Audio Monitor
   -ft           TDMA Trunking P25p1 Control and Voice, P25p2 Trunked Channels, and DMR
-  -fs           DMR TDMA BS and MS Simplex
-  -f1           Decode only P25 Phase 1
-  -f2           Decode only P25 Phase 2 (6000 sps) **
+  -fs           DMR TDMA BS and MS Simplex (optional CC filter: -fs0 to -fs15)
+  -f1           Decode only P25 Phase 1 (optional NAC filter: -f1000 to -f1FFF)
+  -f2           Decode only P25 Phase 2 (6000 sps) ** (optional NAC filter: -f2000 to -f2FFF)
   -fd           Decode only DSTAR
   -fx           Decode only X2-TDMA
   -fy           Decode only YSF
   -fz             Decode only M17*
-  -fi             Decode only NXDN48* (6.25 kHz) / IDAS*
-  -fn             Decode only NXDN96* (12.5 kHz)
+  -fi             Decode only NXDN48* (6.25 kHz) / IDAS* (optional RAN filter: -fi0 to -fi63)
+  -fn             Decode only NXDN96* (12.5 kHz) (optional RAN filter: -fn0 to -fn63)
   -fp             Decode only ProVoice*
   -fh             Decode only EDACS Standard/ProVoice*
   -fH             Decode only EDACS Standard/ProVoice with ESK 0xA0*
@@ -230,8 +230,8 @@ Advanced Decoder options:
                   Note: Disable this if false positives on Voice ENC occur. 
 
  Trunking Options:
-  -C <file>     Import Channel to Frequency Map (channum, freq) from csv file. (Capital C)                   
-                 (See channel_map.csv for example)
+  -C <file>     Import Channel to Frequency Map (channum, freq[, cc/ran/nac]) from csv file. (Capital C)                   
+                 (See channel_map.csv / capacity_plus_chan.csv for examples)
   -G <file>     Import Group List Allow/Block and Label from csv file.
                  (See group.csv for example)
   -T            Enable Trunking Features (NXDN/P25/EDACS/DMR) with RIGCTL/TCP or RTL Input

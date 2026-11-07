@@ -876,6 +876,10 @@
    //Use P25p1 heuristics
    opts->use_heuristics = 0;
 
+   //Access Code Filters (-1 = disabled)
+   opts->dmr_cc_filter = -1;
+   opts->nxdn_ran_filter = -1;
+   opts->p25_nac_filter = -1;
  
  } //initopts
  
@@ -1533,15 +1537,15 @@
    printf ("  -fa           Auto Detection\n");
    printf ("  -fA           Passive Analog Audio Monitor\n");
    printf ("  -ft           TDMA Trunking P25p1 Control and Voice, P25p2 Trunked Channels, and DMR\n");
-   printf ("  -fs           DMR TDMA BS and MS Simplex\n");
-   printf ("  -f1           Decode only P25 Phase 1\n");
-   printf ("  -f2           Decode only P25 Phase 2 (6000 sps) **\n");
+   printf ("  -fs           DMR TDMA BS and MS Simplex (optional CC filter: -fs0 to -fs15)\n");
+   printf ("  -f1           Decode only P25 Phase 1 (optional NAC filter: -f1000 to -f1FFF)\n");
+   printf ("  -f2           Decode only P25 Phase 2 (6000 sps) ** (optional NAC filter: -f2000 to -f2FFF)\n");
    printf ("  -fd           Decode only DSTAR\n");
    printf ("  -fx           Decode only X2-TDMA\n");
    printf ("  -fy           Decode only YSF\n");
    printf ("  -fz             Decode only M17*\n");
-   printf ("  -fi             Decode only NXDN48* (6.25 kHz) / IDAS*\n");
-   printf ("  -fn             Decode only NXDN96* (12.5 kHz)\n");
+   printf ("  -fi             Decode only NXDN48* (6.25 kHz) / IDAS* (optional RAN filter: -fi0 to -fi63)\n");
+   printf ("  -fn             Decode only NXDN96* (12.5 kHz) (optional RAN filter: -fn0 to -fn63)\n");
    printf ("  -fp             Decode only ProVoice*\n");
    printf ("  -fh             Decode only EDACS Standard/ProVoice*\n");
    printf ("  -fH             Decode only EDACS Standard/ProVoice with ESK 0xA0*\n");
@@ -2852,6 +2856,15 @@
              // opts.use_heuristics = 1; //Causes issues with Voice Wide
              sprintf (opts.output_name, "P25p1");
              fprintf (stderr,"Decoding only P25 Phase 1 frames.\n");
+             if (optarg[1] != 0)
+             {
+               int nac_val = -1;
+               if (sscanf(&optarg[1], "%x", &nac_val) == 1 && nac_val >= 0 && nac_val <= 0xFFF)
+               {
+                 opts.p25_nac_filter = nac_val;
+                 fprintf (stderr, "P25 NAC Filter set to %03X\n", opts.p25_nac_filter);
+               }
+             }
            }
            else if (optarg[0] == 'i')
            {
@@ -2881,6 +2894,15 @@
              sprintf (opts.output_name, "NXDN48");
              fprintf (stderr,"Setting symbol rate to 2400 / second\n");
              fprintf (stderr,"Decoding only NXDN 4800 baud frames.\n");
+             if (optarg[1] >= '0' && optarg[1] <= '9')
+             {
+               int ran_val = atoi(&optarg[1]);
+               if (ran_val >= 0 && ran_val <= 63)
+               {
+                 opts.nxdn_ran_filter = ran_val;
+                 fprintf (stderr, "NXDN RAN Filter set to %02d\n", opts.nxdn_ran_filter);
+               }
+             }
              #ifdef NXDN_OLD_SYNC
              //
              #else
@@ -2938,6 +2960,15 @@
              // opts.setmod_bw = 12000;
              sprintf (opts.output_name, "P25p2");
              fprintf (stderr,"Decoding 6000 sps P25p2 frames only!\n");
+             if (optarg[1] != 0)
+             {
+               int nac_val = -1;
+               if (sscanf(&optarg[1], "%x", &nac_val) == 1 && nac_val >= 0 && nac_val <= 0xFFF)
+               {
+                 opts.p25_nac_filter = nac_val;
+                 fprintf (stderr, "P25 NAC Filter set to %03X\n", opts.p25_nac_filter);
+               }
+             }
              }
            else if (optarg[0] == 's')
            {
@@ -2965,6 +2996,15 @@
              sprintf (opts.output_name, "DMR");
  
              fprintf (stderr,"Decoding DMR BS/MS Simplex\n");
+             if (optarg[1] >= '0' && optarg[1] <= '9')
+             {
+               int cc_val = atoi(&optarg[1]);
+               if (cc_val >= 0 && cc_val <= 15)
+               {
+                 opts.dmr_cc_filter = cc_val;
+                 fprintf (stderr, "DMR Color Code Filter set to %02d\n", opts.dmr_cc_filter);
+               }
+             }
            }
            //change ft to only do P25 and DMR (TDMA trunking modes)
            else if (optarg[0] == 't')
@@ -3021,6 +3061,15 @@
              // opts.setmod_bw = 12000; //causing issues
              sprintf (opts.output_name, "NXDN96");
              fprintf (stderr,"Decoding only NXDN 9600 baud frames.\n");
+             if (optarg[1] >= '0' && optarg[1] <= '9')
+             {
+               int ran_val = atoi(&optarg[1]);
+               if (ran_val >= 0 && ran_val <= 63)
+               {
+                 opts.nxdn_ran_filter = ran_val;
+                 fprintf (stderr, "NXDN RAN Filter set to %02d\n", opts.nxdn_ran_filter);
+               }
+             }
              fprintf(stderr, "Notice: NXDN autodetect polarity disabled. \n Use -xn option if Inverted Signal expected.\n");
            }
            else if (optarg[0] == 'r')
@@ -3461,6 +3510,7 @@
        parse_pulse_input_string(&opts, opts.audio_in_dev+5);
      }
 
+     trunk_init_access_code_lookup(&opts, &state);
  
      //UDP Socket Blaster Audio Output Setup
      if((strncmp(opts.audio_out_dev, "udp", 3) == 0))

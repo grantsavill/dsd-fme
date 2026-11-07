@@ -470,6 +470,14 @@ typedef struct
   //DMR Late Entry
   uint8_t dmr_le; //user option to turn on or turn off late entry for enc identifiers
 
+  //DMR Color Code Filter (-1 = disabled / allow all 0-15; 0..15 = only allow matching CC)
+  int dmr_cc_filter;
+
+  //NXDN RAN Filter (-1 = disabled / allow all 0-63; 0..63 = only allow matching RAN/Area)
+  int nxdn_ran_filter;
+
+  //P25 NAC Filter (-1 = disabled / allow all 0x000-0xFFF; 0..0xFFF = only allow matching NAC)
+  int p25_nac_filter;
 
   //Trunking - Use Group List as Allow List
   uint8_t trunk_use_allow_list;

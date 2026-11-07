@@ -526,9 +526,30 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
   printw ("------------------------------------------------------------------------------\n");
   attroff(COLOR_PAIR(4));
 
+  int filter_mismatch = 0;
+  if (opts->dmr_cc_filter >= 0 && opts->dmr_cc_filter <= 15 &&
+      (lls == 10 || lls == 11 || lls == 12 || lls == 13 || lls == 32 || lls == 33 || lls == 34 || opts->frame_dmr == 1) &&
+      (int)state->dmr_color_code != opts->dmr_cc_filter)
+  {
+    filter_mismatch = 1;
+  }
+  if (opts->nxdn_ran_filter >= 0 && opts->nxdn_ran_filter <= 63 &&
+      (lls == 28 || lls == 29 || opts->frame_nxdn48 == 1 || opts->frame_nxdn96 == 1) &&
+      (int)state->nxdn_last_ran != opts->nxdn_ran_filter)
+  {
+    filter_mismatch = 1;
+  }
+  if (opts->p25_nac_filter >= 0 && opts->p25_nac_filter <= 0xFFF &&
+      (lls == 0 || lls == 1 || lls == 35 || lls == 36 || opts->frame_p25p1 == 1 || opts->frame_p25p2 == 1) &&
+      ((lls == 35 || lls == 36 || state->nac == 0) ? (int)state->p2_cc : (int)state->nac) != opts->p25_nac_filter)
+  {
+    filter_mismatch = 1;
+  }
+  int carrier_color = (state->carrier == 1 && !filter_mismatch) ? 3 : 6;
+
   if (state->carrier == 1)
   {
-    attron(COLOR_PAIR(3));
+    attron(COLOR_PAIR(carrier_color));
     level = (int) state->max / 164; //only update on carrier present
     if (opts->mod_qpsk == 1) level = (int) state->max / 328; //test values here
     if (opts->audio_in_type == 4) level = 50; //hard set when reading symbol bin files, otherwise, it will just be near zero
@@ -544,6 +565,9 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
   printw ( "[%d] \n", (48000*opts->wav_interpolator)/state->samplesPerSymbol);
   printw ("| Decoding:    [%s] ", opts->output_name);
   if (opts->aggressive_framesync == 0) printw ("CRC/(RAS) ");
+  if (opts->dmr_cc_filter >= 0 && opts->dmr_cc_filter <= 15 && opts->frame_dmr == 1) printw ("[DCC Filter: %02d] ", opts->dmr_cc_filter);
+  if (opts->nxdn_ran_filter >= 0 && opts->nxdn_ran_filter <= 63 && (opts->frame_nxdn48 == 1 || opts->frame_nxdn96 == 1)) printw ("[RAN Filter: %02d] ", opts->nxdn_ran_filter);
+  if (opts->p25_nac_filter >= 0 && opts->p25_nac_filter <= 0xFFF && (opts->frame_p25p1 == 1 || opts->frame_p25p2 == 1)) printw ("[NAC Filter: %03X] ", opts->p25_nac_filter);
   //debug -- troubleshoot voice tuning after grant on DMR CC, subsequent grant may not tune because tuner isn't available
   if (opts->p25_trunk == 1 && opts->p25_is_tuned == 1) printw ("Tuner Locked    ");
   if (opts->p25_trunk == 1 && opts->p25_is_tuned == 0) printw ("Tuner Available ");
@@ -572,6 +596,10 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
     printw ("\n");
   }
   printw ("------------------------------------------------------------------------------\n");
+  if (state->carrier == 1 && filter_mismatch)
+  {
+    attroff(COLOR_PAIR(6));
+  }
 
   printw ("--Call Info-------------------------------------------------------------------\n");
 
@@ -820,7 +848,7 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
       }
       if (state->carrier == 1)
       {
-        attron(COLOR_PAIR(3));
+        attron(COLOR_PAIR(carrier_color));
       }
     }
 
@@ -889,7 +917,7 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
         if (state->active_channel[i] != 0) printw ("%s", state->active_channel[i]);
       }
 
-      if (state->carrier == 1) attron(COLOR_PAIR(3));
+      if (state->carrier == 1) attron(COLOR_PAIR(carrier_color));
       else attroff(COLOR_PAIR(4));
     }
 
@@ -1171,7 +1199,7 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
       attroff(COLOR_PAIR(5));
       if (state->carrier == 1)
       {
-        attron(COLOR_PAIR(3));
+        attron(COLOR_PAIR(carrier_color));
       }
     }
 
@@ -1194,13 +1222,13 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
           printw ("[%s] ", state->group_array[k].groupMode);
           if (state->carrier == 1)
           {
-            attron(COLOR_PAIR(3));
+            attron(COLOR_PAIR(carrier_color));
           }
         }
       }
     }
 
-    if (state->carrier == 1) attron(COLOR_PAIR(3));
+    if (state->carrier == 1) attron(COLOR_PAIR(carrier_color));
     else attroff(COLOR_PAIR(4));
 
     printw ("\n");
@@ -1384,12 +1412,12 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
           }
           if (state->carrier == 1)
           {
-            attron(COLOR_PAIR(3));
+            attron(COLOR_PAIR(carrier_color));
           }
         }
       }
 
-      if (state->carrier == 1) attron(COLOR_PAIR(3));
+      if (state->carrier == 1) attron(COLOR_PAIR(carrier_color));
       else attroff(COLOR_PAIR(4));
 
       printw ("\n");
@@ -1405,7 +1433,7 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
           if (state->active_channel[i] != 0) printw ("%s", state->active_channel[i]);
         }
 
-        if (state->carrier == 1) attron(COLOR_PAIR(3));
+        if (state->carrier == 1) attron(COLOR_PAIR(carrier_color));
         else attroff(COLOR_PAIR(4));
         printw ("\n");
       }
@@ -1440,7 +1468,7 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
         //TG Hold, if specified by user
         if (state->tg_hold != 0) printw ("TG HOLD: %d", state->tg_hold);
 
-        if (state->carrier == 1) attron(COLOR_PAIR(3));
+        if (state->carrier == 1) attron(COLOR_PAIR(carrier_color));
         else attroff(COLOR_PAIR(4));
         printw ("\n");
       }
@@ -1658,6 +1686,7 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
   //colors off
   if (state->carrier == 1){ //same as above
     attroff(COLOR_PAIR(3));
+    attroff(COLOR_PAIR(6));
   }
   //only print event history if enabled
   attron(COLOR_PAIR(4)); //cyan for history

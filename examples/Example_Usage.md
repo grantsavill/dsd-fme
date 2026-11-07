@@ -4,18 +4,18 @@
 
 ```
 -ft XDMA decoder class (P25p1 and p2, YSF, and DMR Stereo)
--fs DMR Stereo, also may need to use -xr if inverted DMR
+-fs DMR Stereo (optional Color Code filter: -fs0 to -fs15), also may need to use -xr if inverted DMR
 -fa Legacy Auto (not recommended)
--fi NXDN48
--fn NXDN96
+-fi NXDN48 (optional RAN filter: -fi0 to -fi63)
+-fn NXDN96 (optional RAN filter: -fn0 to -fn63)
 -fp Provoice
 -fh EDACS Standard / Network
 -fH EDACS Standard / Network with ESK
 -fe EDACS Extended Addresssing
 -fE EDACS Extended Addressing with ESK
 -fm dPMR, also may need to use -xd if inverted dPMR.
--f1 P25P1
--f2 P25P2 (may need to specify wacn/sys/nac manually if traffic channel)
+-f1 P25P1 (optional NAC filter: -f1000 to -f1FFF)
+-f2 P25P2 (optional NAC filter: -f2000 to -f2FFF; may need to specify wacn/sys/nac manually if traffic channel)
 -fx X2-TDMA
 -fy YSF
 -fz M17 Stream
@@ -159,7 +159,7 @@ NXDN Trunking Update: NXDN DFA (Direct Frequency Assignment) has been coded from
 
 NXDN Type-D/IDAS Update: Type-D or IDAS decoding/trunking has been coded now and tested on a small two channel system. Set up a channel map much like Type-C trunking. If preferred, insert channel 31 at the top of your channel map for the 'home repeater' or go to channel of choice during a TX_REL or DISC message. Extensive testing of Type-D has not been conducted. Some cavaets may currently include iffy per call wav file saving and potentially shifting SRC and TGT ID values due to how SCCH messages are handled and how Busy Repeater Messages are handled. Private calls will need to be enabled by enabling 'data calls', if desired. During testing, only data calls came on private calls, so this was set to disabled by default, but can be enabled with data calls enabled. Also, note that some home repeater channels may or may not carry calls from all systems.
 
-Channel Map and Group CSV Note: Leave the top line of the channel_map.csv and group.csv as the label, do not delete the line, if no line is there, dsd_import skips the first line so it will not import the first channel or first group in those files if there is something there that isn't a label. 
+Channel Map and Group CSV Note: Leave the top line of the channel_map.csv and group.csv as the label, do not delete the line, if no line is there, dsd_import skips the first line so it will not import the first channel or first group in those files if there is something there that isn't a label. Channel map CSV files (`-C`) also support an optional 3rd column (`channel,frequency,access_code`) to specify a per-channel DMR Color Code (`0-15` decimal), NXDN RAN (`0-63` decimal), or P25 NAC (`000-FFF` hex) that is automatically applied whenever DSD-FME tunes to that channel during trunking or `-Y` scanning.
 
 Hytera XPT: Code has been added for XPT system slco/flco/csbk decoding and trunking. The setup will be similar to Capacity Plus trunking in the csv file, listing each LSN channel to a frequency (see examples/hytera_xpt_chan.csv). Currently, this set up is working with smaller XPT systems that I have been able to test with.
 
@@ -227,6 +227,9 @@ G - Manually increase RTL gain
 
 { - Manually decrease PPM
 } - Manually increase PPM
+0 - Lock/Unlock DMR Color Code, NXDN RAN, or P25 NAC filter on current active signal
+. - Increment DMR Color Code (0-15), NXDN RAN (0-63), or P25 NAC (000-FFF) filter
+, - Decrement DMR Color Code (0-15), NXDN RAN (0-63), or P25 NAC (000-FFF) filter
 
 ```
 

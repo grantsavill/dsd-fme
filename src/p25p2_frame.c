@@ -1011,7 +1011,25 @@ void process_P2_DUID (dsd_opts * opts, dsd_state * state)
 			memset(state->s_r4, 0, sizeof(state->s_r4));
 		}
 
-		if (duid_decoded == 0)
+		if (opts->p25_nac_filter < 0 || opts->p25_nac_filter > 0xFFF ||
+		    (state->p2_cc != 0 && (int)state->p2_cc == opts->p25_nac_filter))
+		{
+			state->last_cc_sync_time = time(NULL);
+		}
+		if (opts->p25_nac_filter >= 0 && opts->p25_nac_filter <= 0xFFF &&
+		    state->p2_cc != 0 && (int)state->p2_cc != opts->p25_nac_filter &&
+		    duid_decoded != 13 && duid_decoded != 12 && duid_decoded != 15)
+		{
+			fprintf (stderr, " [NAC FILTER: %03X]", opts->p25_nac_filter);
+			voice = 0;
+			state->voice_counter[0] = 0;
+			state->voice_counter[1] = 0;
+			memset(state->f_l4, 0, sizeof(state->f_l4));
+			memset(state->f_r4, 0, sizeof(state->f_r4));
+			memset(state->s_l4, 0, sizeof(state->s_l4));
+			memset(state->s_r4, 0, sizeof(state->s_r4));
+		}
+		else if (duid_decoded == 0)
 		{
 			fprintf (stderr, " 4V %d", state->fourv_counter[state->currentslot]+1);
 			//debug see which 4V and which 2V randomly pop on Duke P25p2 CC (8 bit binary code)

@@ -130,6 +130,8 @@ bool SetFreq(int sockfd, long int freq)
 {
     char buf[BUFSIZE];
 
+    trunk_update_filter_for_freq(freq);
+
     sprintf (buf, "F %ld\n", freq);
     Send(sockfd, buf);
     Recv(sockfd, buf);

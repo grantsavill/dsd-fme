@@ -1,4 +1,4 @@
-channel(dec), freq(Hz)
+channel(dec),freq(Hz),ran(optional)
 141,423862500
 142,424337500
 143,424912500
