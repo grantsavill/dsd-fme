@@ -1661,15 +1661,32 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
   }
   //only print event history if enabled
   attron(COLOR_PAIR(4)); //cyan for history
-  printw ("--Latest Event History ([|])---Slot %d (\\)---Cycle (h)-Short/Long/Off----------\n", state->eh_slot+1);
+  if (state->eh_slot == 0)
+    printw ("--Latest Event History ([|])----All (\\)-----Cycle (h)-Short/Long/Off----------\n");
+  else
+    printw ("--Latest Event History ([|])---Slot %d (\\)---Cycle (h)-Short/Long/Off----------\n", state->eh_slot);
   if (opts->ncurses_history != 0)
   {
-    for (uint16_t i = (state->eh_index+1); i < (state->eh_index+11); i++)
+    uint8_t idx0 = 1, idx1 = 1;
+    for (uint16_t step = 1; step < (state->eh_index+11); step++)
     {
       uint16_t string_size = 71; //short uniform size that doesn't exceed the fence
       if (opts->ncurses_history == 2)
         string_size = 1999; //full string size
-      uint8_t slot = state->eh_slot;
+      uint8_t slot = (state->eh_slot > 0) ? (state->eh_slot - 1) : 0;
+      uint16_t i = step;
+      if (state->eh_slot == 0)
+      {
+        char * s0 = state->event_history_s[0].Event_History_Items[idx0].event_string;
+        char * s1 = state->event_history_s[1].Event_History_Items[idx1].event_string;
+        uint8_t v0 = (idx0 < 255 && strncmp("BUMBLEBEETUNA", s0, 13) != 0);
+        uint8_t v1 = (idx1 < 255 && strncmp("BUMBLEBEETUNA", s1, 13) != 0);
+        if (v0 && (!v1 || strncmp(s0, s1, 19) >= 0)) { slot = 0; i = idx0++; }
+        else if (v1) { slot = 1; i = idx1++; }
+        else { slot = 0; i = (idx0 < 255) ? idx0 : 254; }
+      }
+      if (step <= state->eh_index)
+        continue;
       uint8_t color_pair = state->event_history_s[slot].Event_History_Items[i%255].color_pair; //this is the color pair assignment for this line
       attron(COLOR_PAIR(4));
 
@@ -1679,12 +1696,12 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
       {
         memcpy(text_string, state->event_history_s[slot].Event_History_Items[i%255].event_string, string_size*sizeof(char));
         text_string[string_size] = 0; //terminate string
-        printw ("| #%03d ", i%255);
+        printw ("| #%03d ", step%255);
         attron(COLOR_PAIR(color_pair)); //this is where the custom color switch occurs for the event_string
         printw ("%s\n", text_string);
         attron(COLOR_PAIR(4));
       }
-      else printw ("| #%03d \n", i%255); //empty event, but since we can freely scroll now, keeps things uniform
+      else printw ("| #%03d \n", step%255); //empty event, but since we can freely scroll now, keeps things uniform
 
       sprintf (text_string, "%s", "BUMBLEBEETUNA");
       if (strncmp(text_string, state->event_history_s[slot].Event_History_Items[i%255].text_message, 13) != 0)

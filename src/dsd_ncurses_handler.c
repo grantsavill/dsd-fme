@@ -660,7 +660,7 @@ uint8_t ncurses_input_handler(dsd_opts * opts, dsd_state * state, int c)
 
   if (c == 92) //'\' key - toggle events for slot displayed, and reset eh_index
   {
-    state->eh_slot ^= 1;
+    state->eh_slot = (state->eh_slot + 1) % 3;
     state->eh_index = 0;
   }
 
