@@ -68,6 +68,14 @@ void NXDN_SACCH_Full_decode(dsd_opts * opts, dsd_state * state)
 
 void NXDN_Elements_Content_decode(dsd_opts * opts, dsd_state * state, uint8_t CrcCorrect, uint8_t * ElementsContent)
 {
+  //NXDN RAN Filter: ignore non-matching RANs
+  if (opts->nxdn_ran_filter >= 0 && opts->nxdn_ran_filter <= 63 &&
+      (int)state->nxdn_last_ran >= 0 && (int)state->nxdn_last_ran <= 63 &&
+      (int)state->nxdn_last_ran != opts->nxdn_ran_filter)
+  {
+    fprintf (stderr, " [RAN FILTER: %02d]", opts->nxdn_ran_filter);
+    return;
+  }
 
   //Including Flags on bit 0 and bit 1 for more precise usage below
   uint8_t MessageType = (uint8_t)convert_bits_into_output(ElementsContent+0, 8);
@@ -170,6 +178,7 @@ void NXDN_Elements_Content_decode(dsd_opts * opts, dsd_state * state, uint8_t Cr
     case 0x08: //TX_REL
       sprintf (state->call_string[0], "%s", "");
       sprintf (state->nxdn_call_type, "%s", "");
+      nxdn_talker_alias_reset(state);
       //invalidate any active data call assembly and wipe storage
       //clear storage
       memset(state->dmr_pdu_sf[0], 0, sizeof(state->dmr_pdu_sf[0]));
@@ -203,8 +212,7 @@ void NXDN_Elements_Content_decode(dsd_opts * opts, dsd_state * state, uint8_t Cr
     //DISC
     case 0x11:
       NXDN_decode_VCALL(opts, state, ElementsContent);
-      memset (state->generic_talker_alias[0], 0, sizeof(state->generic_talker_alias[0]));
-      sprintf (state->generic_talker_alias[0], "%s", "");
+      nxdn_talker_alias_reset(state);
       sprintf (state->call_string[0], "%s", "");
       sprintf (state->nxdn_call_type, "%s", "");
 
@@ -800,29 +808,37 @@ void NXDN_decode_Alias16(dsd_opts * opts, dsd_state * state, uint8_t * Message)
   }
   else fprintf (stderr, " (%d/%d) ", seg_num, seg_len);
 
-  //copy to PDU superframe
-  memcpy(state->dmr_pdu_sf[0]+(seg_num-1)*seg_byte_num, seg_bytes, seg_byte_num*sizeof(uint8_t));
+  if (seg_num == 0 || seg_len == 0 || seg_num > seg_len || seg_len > 15)
+    return;
+
+  if (state->nxdn_alias_total != seg_len)
+  {
+    state->nxdn_alias_blk_ok = 0;
+    state->nxdn_alias_total = seg_len;
+    memset(state->nxdn_alias_buf, 0, sizeof(state->nxdn_alias_buf));
+  }
+
+  //copy to dedicated NXDN alias assembly buffer
+  memcpy(state->nxdn_alias_buf+(seg_num-1)*seg_byte_num, seg_bytes, seg_byte_num*sizeof(uint8_t));
+  state->nxdn_alias_blk_ok |= (uint16_t)(1U << (seg_num - 1));
 
   int len = seg_byte_num * seg_len;
 
-  //TODO: Appears to have embedded 2 byte crc, populated up to 12 bits
-  //not a match (may need bitwise, or may need entire messages put together and not just alias)
-  // uint16_t crc_chk = crc12f(state->dmr_pdu_sf[0], 12);
-
   //extract CRC
-  uint16_t crc_ext = (state->dmr_pdu_sf[0][len-2] << 8) | (state->dmr_pdu_sf[0][len-1] << 0);
+  uint16_t crc_ext = (state->nxdn_alias_buf[len-2] << 8) | (state->nxdn_alias_buf[len-1] << 0);
 
   //remove CRC bytes
   if (len > 2)
     len -= 2;
 
-  if (seg_num == seg_len)
+  uint16_t want = (uint16_t)((1U << seg_len) - 1U);
+  if ((state->nxdn_alias_blk_ok & want) == want)
   {
     if (opts->payload == 1)
     {
       fprintf (stderr, "\n Completed Alias Encoded: ");
       for (int i = 0; i < (seg_len*seg_byte_num); i++)
-        fprintf (stderr, "%02X", state->dmr_pdu_sf[0][i]);
+        fprintf (stderr, "%02X", state->nxdn_alias_buf[i]);
     }
 
     //Alias String
@@ -843,8 +859,8 @@ void NXDN_decode_Alias16(dsd_opts * opts, dsd_state * state, uint8_t * Message)
     {
       
       uni  = 0;
-      utf8 = state->dmr_pdu_sf[0][k];
-      c16b = (state->dmr_pdu_sf[0][k+0] << 8) | state->dmr_pdu_sf[0][k+1];
+      utf8 = state->nxdn_alias_buf[k];
+      c16b = (state->nxdn_alias_buf[k+0] << 8) | state->nxdn_alias_buf[k+1];
 
       if (utf8 >= 0x20 && utf8 < 0x80)
       {
@@ -860,7 +876,6 @@ void NXDN_decode_Alias16(dsd_opts * opts, dsd_state * state, uint8_t * Message)
         uni = sjis_char_to_unicode(c16b);
         #elif UTF16_DECODE //try as UTF16BE (untested through Unicode to UTF8 decoder)
         uni = c16b; //UTF16BE
-        // uni = (state->dmr_pdu_sf[0][k+1] << 8) | state->dmr_pdu_sf[0][k+0]; //UTF16LE (for test only)
         #endif
         fprintf (stderr, "%lc", uni);
         k+=2;
@@ -881,8 +896,10 @@ void NXDN_decode_Alias16(dsd_opts * opts, dsd_state * state, uint8_t * Message)
     sprintf (state->generic_talker_alias[0], "%s", alias);
     sprintf (state->event_history_s[0].Event_History_Items[0].alias, "%s; ", alias);
 
-    //reset PDU superframe afterwards
-    memset(state->dmr_pdu_sf[0], 0, sizeof(state->dmr_pdu_sf[0]));
+    //reset assembly state afterwards (generic_talker_alias remains set until call end)
+    state->nxdn_alias_blk_ok = 0;
+    state->nxdn_alias_total = 0;
+    memset(state->nxdn_alias_buf, 0, sizeof(state->nxdn_alias_buf));
   }
 
 } /* End NXDN_decode_Alias16 */
@@ -945,50 +962,55 @@ void NXDN_decode_Alias(dsd_opts * opts, dsd_state * state, uint8_t * Message)
   uint8_t blocknumber = (uint8_t)ConvertBitIntoBytes(&Message[32], 4) & 0x7;
   uint8_t total = (uint8_t)ConvertBitIntoBytes(&Message[36], 4) & 0x7;
 
-  //crc errs in one repitition may occlude an otherwise good alias, so test and change if needed
-  //completed alias should still appear in ncurses terminal regardless, so this may be okay
   if (CrcCorrect)
   {
     fprintf (stderr, " (%d/%d) ", blocknumber, total);
 
-    blocknumber--;
-    total--;
+    if (blocknumber == 0 || total == 0 || blocknumber > 4 || total > 4 || blocknumber > total)
+      return;
 
-    int ptr = blocknumber*4;
+    if (state->nxdn_alias_total != total)
+    {
+      state->nxdn_alias_blk_ok = 0;
+      state->nxdn_alias_total = total;
+      memset (state->nxdn_alias_buf, 0, sizeof(state->nxdn_alias_buf));
+    }
 
+    int ptr = (blocknumber - 1) * 4;
     for (int i = 0; i < 4; i++)
-      state->generic_talker_alias[0][ptr++] = (char)ConvertBitIntoBytes(&Message[40+(i*8)], 8);
+      state->nxdn_alias_buf[ptr++] = (uint8_t)ConvertBitIntoBytes(&Message[40+(i*8)], 8);
 
-    //on block 4, the last two (14, and 15) will not be an alias value, but a CRC value (seemingly)
-    state->generic_talker_alias[0][14] = '\0';
-    state->generic_talker_alias[0][15] = '\0';
+    state->nxdn_alias_blk_ok |= (uint16_t)(1U << (blocknumber - 1));
 
-    //comb alias so far, if characters greater than ASCII 0x7F, this may be a UTF16 encoded alias
-    //May be more beneficial in long run to use the ARIB alias with SJIS and/or UTF16 to UTF8 in it.
-    //NOTE: This will not prevent 'splicing' issues if signal issue occurs and resumes with another alias
-    //this alias string is cleared on TX_REL, TX_REL_EXT, noCarrier, and few other items
-    for (int i = 0; i < 14; i++)
+    uint16_t want = (uint16_t)((1U << total) - 1U);
+    if ((state->nxdn_alias_blk_ok & want) != want)
+      return;
+
+    //all blocks 1..total received: assemble and display completed alias (bytes 14..15 on block 4 are CRC)
+    char alias[16]; memset (alias, 0, sizeof(alias));
+    int max_len = total * 4;
+    if (max_len > 14) max_len = 14;
+
+    for (int i = 0; i < max_len; i++)
     {
-      //substitute with a space if early terminator (partial decode) or greater than end of ASCII
-      if (state->generic_talker_alias[0][i] < 0x20 || state->generic_talker_alias[0][i] > 0x7F)
-        state->generic_talker_alias[0][i] = 0x20;
+      uint8_t c = state->nxdn_alias_buf[i];
+      if (c < 0x20 || c > 0x7E) c = 0x20;
+      alias[i] = (char)c;
     }
 
-    //walk backwards, remove any ending spaces with a terminator
-    for (int i = 13; i >= 1; i--)
+    //trim trailing spaces
+    for (int i = max_len - 1; i >= 0; i--)
     {
-      if (state->generic_talker_alias[0][i] == 0x20)
-        state->generic_talker_alias[0][i] = '\0';
-
-      if (state->generic_talker_alias[0][i-1] != 0x20)
-        break;
+      if (alias[i] == ' ') alias[i] = '\0';
+      else break;
     }
 
-    sprintf (state->event_history_s[0].Event_History_Items[0].alias, "%s; ", state->generic_talker_alias[0]);
-
-    setlocale(LC_ALL, "");
-    // if (blocknumber == total)
+    if (alias[0] != '\0')
     {
+      sprintf (state->generic_talker_alias[0], "%s", alias);
+      sprintf (state->event_history_s[0].Event_History_Items[0].alias, "%s; ", alias);
+
+      setlocale(LC_ALL, "");
       if (opts->payload == 1)
         fprintf (stderr, "\n Talker Alias: %s", state->generic_talker_alias[0]);
       else fprintf (stderr, "%s", state->generic_talker_alias[0]);
@@ -1615,7 +1637,10 @@ void NXDN_decode_VCALL(dsd_opts * opts, dsd_state * state, uint8_t * Message)
   {
     //only assign rid if not spare and not reserved (happens on private calls, unsure of its significance)
     if ( (VoiceCallOption & 0xF) < 4) //ideally, only want 0, 1, 2, 3, or 4 (or 6, 7 on telephone calls)
+    {
       state->nxdn_last_rid = SourceUnitID;
+      nxdn_talker_alias_sync_source (state, SourceUnitID);
+    }
     state->nxdn_last_tg = DestinationID;
     state->nxdn_key = KeyID;
     if (CallType == 0 || CallType == 1) //broadcast and group
@@ -1630,8 +1655,7 @@ void NXDN_decode_VCALL(dsd_opts * opts, dsd_state * state, uint8_t * Message)
     state->nxdn_last_rid = 0;
     state->nxdn_last_tg = 0;
     state->gi[0] = -1;
-    memset (state->generic_talker_alias[0], 0, sizeof(state->generic_talker_alias[0]));
-    sprintf (state->generic_talker_alias[0], "%s", "");
+    nxdn_talker_alias_reset(state);
   }
 
   //set enc bit here so we can tell playSynthesizedVoice whether or not to play enc traffic
@@ -1815,6 +1839,14 @@ void NXDN_decode_scch(dsd_opts * opts, dsd_state * state, uint8_t * Message, uin
   // if (state->nxdn_last_ran == -1)          state->nxdn_last_ran = 99;
 
   state->nxdn_last_ran = area;
+
+  //NXDN RAN/Area Filter: ignore non-matching Area on IDAS SCCH
+  if (opts->nxdn_ran_filter >= 0 && opts->nxdn_ran_filter <= 63 &&
+      (int)state->nxdn_last_ran != opts->nxdn_ran_filter)
+  {
+    fprintf (stderr, " [RAN FILTER: %02d]", opts->nxdn_ran_filter);
+    return;
+  }
 
   state->last_cc_sync_time = time(NULL);
 
@@ -2290,7 +2322,10 @@ void NXDN_decode_VCALL_ARIB(dsd_opts * opts, dsd_state * state, uint8_t * Messag
   {
     //only assign rid if not spare and not reserved (happens on private calls, unsure of its significance)
     if ( (VoiceCallOption & 0xF) < 4) //ideally, only want 0, 1, 2, 3, or 4 (or 6, 7 on telephone calls)
+    {
       state->nxdn_last_rid = SourceUnitID;
+      nxdn_talker_alias_sync_source (state, SourceUnitID);
+    }
     state->nxdn_last_tg = DestinationID;
     state->nxdn_key = KeyID;
     if (CallType == 0 || CallType == 1) //broadcast and group
@@ -2305,8 +2340,7 @@ void NXDN_decode_VCALL_ARIB(dsd_opts * opts, dsd_state * state, uint8_t * Messag
     state->nxdn_last_rid = 0;
     state->nxdn_last_tg = 0;
     state->gi[0] = -1;
-    memset (state->generic_talker_alias[0], 0, sizeof(state->generic_talker_alias[0]));
-    sprintf (state->generic_talker_alias[0], "%s", "");
+    nxdn_talker_alias_reset(state);
   }
 
   //set enc bit here so we can tell playSynthesizedVoice whether or not to play enc traffic
@@ -2345,28 +2379,38 @@ void NXDN_decode_ALIAS_ARIB(dsd_opts * opts, dsd_state * state, uint8_t * Messag
   }
   else fprintf (stderr, " %d/%d; ", seg_num, seg_len);
 
-  //copy to PDU superframe
-  memcpy(state->dmr_pdu_sf[0]+(seg_num-1)*seg_byte_num, seg_bytes, seg_byte_num*sizeof(uint8_t));
+  if (seg_num == 0 || seg_len == 0 || seg_num > seg_len || seg_len > 15)
+    return;
+
+  if (state->nxdn_alias_total != seg_len)
+  {
+    state->nxdn_alias_blk_ok = 0;
+    state->nxdn_alias_total = seg_len;
+    memset(state->nxdn_alias_buf, 0, sizeof(state->nxdn_alias_buf));
+  }
+
+  //copy to dedicated NXDN alias assembly buffer
+  memcpy(state->nxdn_alias_buf+(seg_num-1)*seg_byte_num, seg_bytes, seg_byte_num*sizeof(uint8_t));
+  state->nxdn_alias_blk_ok |= (uint16_t)(1U << (seg_num - 1));
 
   int len = seg_byte_num * seg_len;
 
-  //TODO: Do a CRC32 Check, currently relying on each SACCH frame CRC instead
-
   //extract CRC32
-  uint32_t crc_ext = (state->dmr_pdu_sf[0][len-4] << 24) | (state->dmr_pdu_sf[0][len-3] << 16) | 
-                     (state->dmr_pdu_sf[0][len-2] <<  8) |  state->dmr_pdu_sf[0][len-1];
+  uint32_t crc_ext = (state->nxdn_alias_buf[len-4] << 24) | (state->nxdn_alias_buf[len-3] << 16) | 
+                     (state->nxdn_alias_buf[len-2] <<  8) |  state->nxdn_alias_buf[len-1];
 
   //remove CRC32 bytes
   if (len > 4)
     len -= 4;
 
-  if (seg_num == seg_len)
+  uint16_t want = (uint16_t)((1U << seg_len) - 1U);
+  if ((state->nxdn_alias_blk_ok & want) == want)
   {
     if (opts->payload == 1)
     {
       fprintf (stderr, "\n Completed Alias Encoded: ");
       for (int i = 0; i < (seg_len*seg_byte_num); i++)
-        fprintf (stderr, "%02X", state->dmr_pdu_sf[0][i]);
+        fprintf (stderr, "%02X", state->nxdn_alias_buf[i]);
     }
 
     //Alias String
@@ -2387,8 +2431,8 @@ void NXDN_decode_ALIAS_ARIB(dsd_opts * opts, dsd_state * state, uint8_t * Messag
     {
       
       c16  = 0;
-      utf8 = state->dmr_pdu_sf[0][k];
-      sjis = (state->dmr_pdu_sf[0][k] << 8) | state->dmr_pdu_sf[0][k+1];
+      utf8 = state->nxdn_alias_buf[k];
+      sjis = (state->nxdn_alias_buf[k] << 8) | state->nxdn_alias_buf[k+1];
 
       if (utf8 >= 0x20 && utf8 < 0x80)
       {
@@ -2418,8 +2462,10 @@ void NXDN_decode_ALIAS_ARIB(dsd_opts * opts, dsd_state * state, uint8_t * Messag
     sprintf (state->generic_talker_alias[0], "%s", alias);
     sprintf (state->event_history_s[0].Event_History_Items[0].alias, "%s; ", alias);
 
-    //reset PDU superframe afterwards
-    memset(state->dmr_pdu_sf[0], 0, sizeof(state->dmr_pdu_sf[0]));
+    //reset assembly state afterwards (generic_talker_alias remains set until call end)
+    state->nxdn_alias_blk_ok = 0;
+    state->nxdn_alias_total = 0;
+    memset(state->nxdn_alias_buf, 0, sizeof(state->nxdn_alias_buf));
   }
 
 } /* End NXDN_decode_ALIAS_ARIB() */

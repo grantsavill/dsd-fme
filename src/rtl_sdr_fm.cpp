@@ -1242,6 +1242,7 @@ int get_rtlsdr_sample(int16_t *sample, dsd_opts * opts, dsd_state * state)
 //function may lag since it isn't running as its own thread
 void rtl_dev_tune(dsd_opts * opts, long int frequency)
 {
+	trunk_update_filter_for_freq(frequency);
 
 	if (opts->payload == 1)
 		fprintf (stderr, "\nTuning to %lu Hz.", frequency);

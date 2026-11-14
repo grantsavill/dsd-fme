@@ -101,6 +101,12 @@
 
     //when no carrier sync, rotate the symbol out file every hour, if enabled
     rotate_symbol_out_file(opts, state); //this should handle any conventional system where no sync conditions occur when no activity
+    if (opts->frame_tetra == 1 && state->tetra_cod_batch_count > 0)
+    {
+      tetra_flush_voice_batch(opts, state);
+    }
+    state->tetra_voice_slot = 0;
+    state->tetra_voice_usage = 0;
  
    if (opts->floating_point == 1)
    {
@@ -122,8 +128,22 @@
    state->nxdn_last_tg = 0;
    #endif
  
+   if (state->dmr_unconfirmed_sync == 1)
+   {
+     state->last_cc_sync_time = state->dmr_unconfirmed_cc_sync_time;
+     state->last_vc_sync_time = state->dmr_unconfirmed_vc_sync_time;
+     state->dmr_unconfirmed_sync = 0;
+   }
+
    //experimental conventional frequency scanner mode
-   if (opts->scanner_mode == 1 && ( (time(NULL) - state->last_cc_sync_time) > opts->trunk_hangtime))
+   int not_on_imported_scan = 0;
+   if (opts->scanner_mode == 1 && state->lcn_freq_count > 0)
+   {
+     long int cur_f = trunk_get_current_freq(opts, state);
+     if (cur_f > 0 && !trunk_is_imported_freq(state, cur_f))
+       not_on_imported_scan = 1;
+   }
+   if (opts->scanner_mode == 1 && (not_on_imported_scan || ((time(NULL) - state->last_cc_sync_time) > opts->trunk_hangtime)))
    {
  
      //always do these -- makes sense during scanning
@@ -159,74 +179,121 @@
    //end experimental conventional frequency scanner mode
  
    //tune back to last known CC when using trunking after x second hangtime
-   if (opts->p25_trunk == 1 && opts->p25_is_tuned == 1 && ( (time(NULL) - state->last_cc_sync_time) > opts->trunk_hangtime) )
+   if (opts->p25_trunk == 1 && (opts->p25_is_tuned == 1 || state->dmr_rest_channel != -1) && ( (time(NULL) - state->last_cc_sync_time) > opts->trunk_hangtime) )
    {
-     if (state->p25_cc_freq != 0)
+     //cap+ rest channel - update p25_cc_freq from dmr_rest_channel even if p25_cc_freq was 0
+     if (state->dmr_rest_channel != -1)
      {
- 
-       //cap+ rest channel - redundant?
-       if (state->dmr_rest_channel != -1)
+       if (state->trunk_chan_map[state->dmr_rest_channel] != 0)
        {
-         if (state->trunk_chan_map[state->dmr_rest_channel] != 0)
-         {
-           state->p25_cc_freq = state->trunk_chan_map[state->dmr_rest_channel];
-         }
-       }
- 
-       if (opts->use_rigctl == 1) //rigctl tuning
-       {
-         if (opts->setmod_bw != 0 ) SetModulation(opts->rigctl_sockfd, opts->setmod_bw);
-         SetFreq(opts->rigctl_sockfd, state->p25_cc_freq);
-         state->dmr_rest_channel = -1; //maybe?
-       }
-       //rtl
-       else if (opts->audio_in_type == 3)
-       {
-         #ifdef USE_RTLSDR
-         rtl_dev_tune (opts, state->p25_cc_freq);
-         state->dmr_rest_channel = -1;
-         #endif
-       }
- 
-       opts->p25_is_tuned = 0;
-       state->edacs_tuned_lcn = -1;
- 
-       state->last_cc_sync_time = time(NULL);
-       //test to switch back to 10/4 P1 QPSK for P25 FDMA CC
- 
-       //if P25p2 VCH and going back to P25p1 CC, flip symbolrate
-       if (state->p25_cc_is_tdma == 0) //is set on signal from P25 TSBK or MAC_SIGNAL
-       {
-         state->samplesPerSymbol = 10;
-         state->symbolCenter = 4;
-         //re-enable both slots
-         opts->slot1_on = 1;
-         opts->slot2_on = 1;
-       }
-       //if P25p1 SNDCP channel (or revert) and going to a P25 TDMA CC
-       else if (state->p25_cc_is_tdma == 1)
-       {
-         state->samplesPerSymbol = 8;
-         state->symbolCenter = 3;
-         //re-enable both slots (in case of late entry voice, MAC_SIGNAL can turn them back off)
-         opts->slot1_on = 1;
-         opts->slot2_on = 1;
+         state->p25_cc_freq = state->trunk_chan_map[state->dmr_rest_channel];
        }
      }
-     //zero out vc frequencies?
-     state->p25_vc_freq[0] = 0;
-     state->p25_vc_freq[1] = 0;
  
-     memset(state->active_channel, 0, sizeof(state->active_channel));
+     long int cur_freq = 0;
+     if (opts->use_rigctl == 1 && opts->rigctl_sockfd != 0)
+       cur_freq = GetCurrentFreq(opts->rigctl_sockfd);
+     else if (opts->audio_in_type == 3)
+       cur_freq = (long int)opts->rtlsdr_center_freq;
  
-     state->is_con_plus = 0; //flag off
+     //Cap+ idle rest channel bursts every ~3-4s with no carrier in between;
+     //if we are already parked on the rest channel frequency, wait for the next
+     //beacon burst before clearing dmr_rest_channel and triggering CC hunting
+     int cap_plus_rest_wait = 0;
+     if (state->dmr_rest_channel != -1 && state->p25_cc_freq != 0 && cur_freq == state->p25_cc_freq)
+     {
+       if ((time(NULL) - state->last_cc_sync_time) <= (opts->trunk_hangtime + 4))
+         cap_plus_rest_wait = 1;
+     }
+ 
+     if (!cap_plus_rest_wait)
+     {
+       if (state->p25_cc_freq != 0)
+       {
+ 
+         if (opts->use_rigctl == 1) //rigctl tuning
+         {
+           if (opts->setmod_bw != 0 ) SetModulation(opts->rigctl_sockfd, opts->setmod_bw);
+           if (cur_freq != state->p25_cc_freq)
+           {
+             SetFreq(opts->rigctl_sockfd, state->p25_cc_freq);
+           }
+           else
+           {
+             state->dmr_rest_channel = -1;
+           }
+         }
+         //rtl
+         else if (opts->audio_in_type == 3)
+         {
+           #ifdef USE_RTLSDR
+           if (cur_freq != state->p25_cc_freq)
+           {
+             rtl_dev_tune (opts, state->p25_cc_freq);
+           }
+           else
+           {
+             state->dmr_rest_channel = -1;
+           }
+           #endif
+         }
+         else
+         {
+           state->dmr_rest_channel = -1;
+         }
+ 
+         opts->p25_is_tuned = 0;
+         state->edacs_tuned_lcn = -1;
+ 
+         //only reset last_cc_sync_time if we actually tuned from a different frequency;
+         //if we were already on p25_cc_freq and hangtime expired, let getFrameSync hunt immediately
+         if (cur_freq != state->p25_cc_freq)
+           state->last_cc_sync_time = time(NULL);
+         //test to switch back to 10/4 P1 QPSK for P25 FDMA CC
+ 
+         //if P25p2 VCH and going back to P25p1 CC, flip symbolrate
+         if (state->p25_cc_is_tdma == 0) //is set on signal from P25 TSBK or MAC_SIGNAL
+         {
+           state->samplesPerSymbol = 10;
+           state->symbolCenter = 4;
+           //re-enable both slots
+           opts->slot1_on = 1;
+           opts->slot2_on = 1;
+         }
+         //if P25p1 SNDCP channel (or revert) and going to a P25 TDMA CC
+         else if (state->p25_cc_is_tdma == 1)
+         {
+           state->samplesPerSymbol = 8;
+           state->symbolCenter = 3;
+           //re-enable both slots (in case of late entry voice, MAC_SIGNAL can turn them back off)
+           opts->slot1_on = 1;
+           opts->slot2_on = 1;
+         }
+       }
+       else
+       {
+         state->dmr_rest_channel = -1;
+         opts->p25_is_tuned = 0;
+         state->edacs_tuned_lcn = -1;
+       }
+       //zero out vc frequencies?
+       state->p25_vc_freq[0] = 0;
+       state->p25_vc_freq[1] = 0;
+ 
+       memset(state->active_channel, 0, sizeof(state->active_channel));
+ 
+       state->is_con_plus = 0; //flag off
+     }
    }
  
    state->dibit_buf_p = state->dibit_buf + 200;
    memset (state->dibit_buf, 0, sizeof (int) * 200);
    //dmr buffer
+   if (state->dmr_payload_p != NULL && state->dmr_payload_p > state->dmr_payload_buf + 200)
+     memcpy (state->dmr_payload_buf, state->dmr_payload_p - 200, sizeof (int) * 200);
+   else if (state->dmr_payload_p == NULL)
+     memset (state->dmr_payload_buf, 0, sizeof (int) * 200);
    state->dmr_payload_p = state->dmr_payload_buf + 200;
-   memset (state->dmr_payload_buf, 0, sizeof (int) * 200);
    memset (state->dmr_stereo_payload, 1, sizeof(int) * 144);
    //dmr buffer end
  
@@ -240,6 +307,11 @@
    state->max = 15000;
    state->min = -15000;
    state->center = 0;
+   if (state->umid == 0 && state->lmid == 0)
+   {
+     state->umid = 9375;
+     state->lmid = -9375;
+   }
    state->err_str[0] = 0;
    state->err_strR[0] = 0;
    sprintf (state->fsubtype, "              ");
@@ -282,6 +354,7 @@
      sprintf(state->dmr_branding_sub, "%s", "");
      sprintf(state->dmr_branding, "%s", "");
      sprintf (state->dmr_site_parms, "%s", "");
+     state->dmr_is_ras = 0;
    }
  
    //The new event history should not require this, but revert if other random issues suddenly come up
@@ -296,11 +369,25 @@
      state->gi[0] = -1;
      state->gi[1] = -1;
     //  state->nxdn_last_ran = -1; //
+     if (opts->dmr_cc_filter >= 0 && opts->dmr_cc_filter <= 15 &&
+         (int)state->dmr_color_code != opts->dmr_cc_filter)
+     {
+       state->dmr_color_code = 16;
+     }
+     if (opts->nxdn_ran_filter >= 0 && opts->nxdn_ran_filter <= 63 &&
+         (int)state->nxdn_last_ran != opts->nxdn_ran_filter)
+     {
+       state->nxdn_last_ran = -1;
+     }
      state->nxdn_last_rid = 0;
      state->nxdn_last_tg = 0;
- 
+     ambe_hw_reset_call(0);
+     ambe_hw_reset_call(1);
+
    }
  
+   state->color_code_ok = 0;
+   state->dmr_unconfirmed_sync = 0;
    state->lastp25type = 0;
    state->repeat = 0;
    state->nac = 0;
@@ -416,6 +503,9 @@
    memset (state->nxdn_sacch_frame_segment, 1, sizeof(state->nxdn_sacch_frame_segment));
    state->nxdn_alias_block_number = 0;
    memset (state->nxdn_alias_block_segment, 0, sizeof(state->nxdn_alias_block_segment));
+   nxdn_talker_alias_reset (state);
+   p25_talker_alias_reset (state, 0);
+   p25_talker_alias_reset (state, 1);
    sprintf (state->nxdn_call_type, "%s", "");
  
    //unload keys when using keylaoder
@@ -473,6 +563,11 @@
    memset(state->dmr_alias_block_len, 0, sizeof(state->dmr_alias_block_len));
    memset(state->dmr_alias_char_size, 0, sizeof(state->dmr_alias_char_size));
    memset(state->dmr_alias_block_segment, 0, sizeof(state->dmr_alias_block_segment));
+   memset(state->dmr_alias_hdr_bits, 0, sizeof(state->dmr_alias_hdr_bits));
+   memset(state->dmr_alias_blk_bits, 0, sizeof(state->dmr_alias_blk_bits));
+   memset(state->dmr_alias_hdr_ok, 0, sizeof(state->dmr_alias_hdr_ok));
+   memset(state->dmr_alias_blk_ok, 0, sizeof(state->dmr_alias_blk_ok));
+   memset(state->dmr_alias_src, 0, sizeof(state->dmr_alias_src));
    memset(state->dmr_embedded_gps, 0, sizeof(state->dmr_embedded_gps));
    memset(state->dmr_lrrp_gps, 0, sizeof(state->dmr_lrrp_gps));
  
@@ -559,6 +654,22 @@
    sprintf (state->m17_meta_string, "%s", "");
 
    state->m17_viterbi_err = 0.0f;
+
+   //TETRA state init (full-init on startup, or reset after >= 2 seconds of no carrier or on exit)
+   if (state->event_history_s == NULL || exitflag == 1 || (time(NULL) - state->last_cc_sync_time) >= 2)
+   {
+     if (state->event_history_s == NULL)
+       state->tetra_sps_phase = 0;
+     else
+       tetra_release_voice_slot(opts, state, 1);
+     tetra_reset_state(state);
+   }
+   state->tetra_mac_frag_len = 0;
+   state->tetra_mac_frag_active = 0;
+   state->tetra_mac_frag_enc = 0;
+   state->tetra_mac_frag_ssi = 0;
+
+   aprs_reset_state(state);
  
    //set float temp buffer to baseline
    memset (state->audio_out_temp_buf, 0.0f, sizeof(state->audio_out_temp_buf));
@@ -816,11 +927,7 @@
    //slot preference is used during OSS audio playback to
    //prefer one tdma voice slot over another when both are playing back
    //this is a fix to OSS 48k/1 output
-   #ifdef __CYGWIN__
-   opts->slot_preference = 0; //default prefer slot 1 -- state->currentslot = 0;
-   #else
    opts->slot_preference = 2; //use 2 since integrating the Stereo Channel Patch;
-   #endif
    //hardset slots to synthesize
    opts->slot1_on = 1;
    opts->slot2_on = 1;
@@ -842,6 +949,15 @@
  
    //Use P25p1 heuristics
    opts->use_heuristics = 0;
+
+   //Access Code Filters (-1 = disabled)
+   opts->dmr_cc_filter = -1;
+   opts->nxdn_ran_filter = -1;
+   opts->p25_nac_filter = -1;
+   opts->tetra_cc_filter = -1;
+   opts->frame_tetra = 0;
+   opts->inverted_tetra = 0;
+   opts->frame_aprs = 0;
  
  } //initopts
  
@@ -857,8 +973,8 @@
    memset (state->dibit_buf, 0, sizeof (int) * 200);
    //dmr buffer -- double check this set up
    state->dmr_payload_buf = malloc (sizeof (int) * 1000000);
-   state->dmr_payload_p = state->dmr_payload_buf + 200;
    memset (state->dmr_payload_buf, 0, sizeof (int) * 200);
+   state->dmr_payload_p = state->dmr_payload_buf + 200;
    memset (state->dmr_stereo_payload, 1, sizeof(int) * 144);
    //dmr buffer end
    state->repeat = 0;
@@ -912,6 +1028,11 @@
    state->audio_out_temp_buf_pR = state->audio_out_temp_bufR;
    //state->wav_out_bytes = 0;
    state->center = 0;
+   if (state->umid == 0 && state->lmid == 0)
+   {
+     state->umid = 9375;
+     state->lmid = -9375;
+   }
    state->jitter = -1;
    state->synctype = -1;
    state->min = -15000;
@@ -1228,6 +1349,12 @@
    memset (state->nxdn_sacch_frame_segment, 1, sizeof(state->nxdn_sacch_frame_segment));
    state->nxdn_alias_block_number = 0;
    memset (state->nxdn_alias_block_segment, 0, sizeof(state->nxdn_alias_block_segment));
+   memset (state->nxdn_alias_buf, 0, sizeof(state->nxdn_alias_buf));
+   state->nxdn_alias_blk_ok = 0;
+   state->nxdn_alias_total = 0;
+   state->nxdn_alias_src = 0;
+   p25_talker_alias_reset (state, 0);
+   p25_talker_alias_reset (state, 1);
    state->nxdn_pn95_seed = 228; //default value
  
    //site/srv/cch info
@@ -1296,6 +1423,11 @@
    memset(state->dmr_alias_block_len, 0, sizeof(state->dmr_alias_block_len));
    memset(state->dmr_alias_char_size, 0, sizeof(state->dmr_alias_char_size));
    memset(state->dmr_alias_block_segment, 0, sizeof(state->dmr_alias_block_segment));
+   memset(state->dmr_alias_hdr_bits, 0, sizeof(state->dmr_alias_hdr_bits));
+   memset(state->dmr_alias_blk_bits, 0, sizeof(state->dmr_alias_blk_bits));
+   memset(state->dmr_alias_hdr_ok, 0, sizeof(state->dmr_alias_hdr_ok));
+   memset(state->dmr_alias_blk_ok, 0, sizeof(state->dmr_alias_blk_ok));
+   memset(state->dmr_alias_src, 0, sizeof(state->dmr_alias_src));
    memset(state->dmr_embedded_gps, 0, sizeof(state->dmr_embedded_gps));
    memset(state->dmr_lrrp_gps, 0, sizeof(state->dmr_lrrp_gps));
    memset(state->active_channel, 0, sizeof(state->active_channel));
@@ -1377,6 +1509,17 @@
    sprintf (state->m17_meta_string, "%s", "");
 
    state->m17_viterbi_err = 0.0f;
+
+   //TETRA state init
+   state->tetra_sps_phase = 0;
+   tetra_reset_state(state);
+   state->tetra_mac_frag_len = 0;
+   state->tetra_mac_frag_active = 0;
+   state->tetra_mac_frag_enc = 0;
+   state->tetra_mac_frag_ssi = 0;
+
+   //APRS state init
+   aprs_init_state(state);
  
    #ifdef USE_CODEC2
    state->codec2_3200 = codec2_create(CODEC2_MODE_3200);
@@ -1384,6 +1527,10 @@
    #endif
  
    state->dmr_color_code = 16;
+   state->color_code_ok = 0;
+   state->dmr_unconfirmed_sync = 0;
+   state->dmr_unconfirmed_cc_sync_time = 0;
+   state->dmr_unconfirmed_vc_sync_time = 0;
    state->dmr_t3_syscode = 0;
  
    //TODO: Test this in different environments before pushing it out
@@ -1419,6 +1566,8 @@
    printf ("\n");
    printf ("Device Options:\n");
    printf ("  -O            List All Pulse Audio Input Sources and Output Sinks (devices).\n");
+   printf ("  AMBE_PORT     Env var to select AMBE3000/AMBE3003 serial port (e.g. COM4,\n");
+   printf ("                /dev/ttyUSB0, or 'none' to disable auto-detection; 'x' toggles in -N).\n");
    printf ("\n");
    printf ("Input/Output options:\n");
    #ifdef __CYGWIN__
@@ -1514,15 +1663,15 @@
    printf ("  -fa           Auto Detection\n");
    printf ("  -fA           Passive Analog Audio Monitor\n");
    printf ("  -ft           TDMA Trunking P25p1 Control and Voice, P25p2 Trunked Channels, and DMR\n");
-   printf ("  -fs           DMR TDMA BS and MS Simplex\n");
-   printf ("  -f1           Decode only P25 Phase 1\n");
-   printf ("  -f2           Decode only P25 Phase 2 (6000 sps) **\n");
+   printf ("  -fs           DMR TDMA BS and MS Simplex (optional CC filter: -fs0 to -fs15)\n");
+   printf ("  -f1           Decode only P25 Phase 1 (optional NAC filter: -f1000 to -f1FFF)\n");
+   printf ("  -f2           Decode only P25 Phase 2 (6000 sps) ** (optional NAC filter: -f2000 to -f2FFF)\n");
    printf ("  -fd           Decode only DSTAR\n");
    printf ("  -fx           Decode only X2-TDMA\n");
    printf ("  -fy           Decode only YSF\n");
    printf ("  -fz             Decode only M17*\n");
-   printf ("  -fi             Decode only NXDN48* (6.25 kHz) / IDAS*\n");
-   printf ("  -fn             Decode only NXDN96* (12.5 kHz)\n");
+   printf ("  -fi             Decode only NXDN48* (6.25 kHz) / IDAS* (optional RAN filter: -fi0 to -fi63)\n");
+   printf ("  -fn             Decode only NXDN96* (12.5 kHz) (optional RAN filter: -fn0 to -fn63)\n");
    printf ("  -fp             Decode only ProVoice*\n");
    printf ("  -fh             Decode only EDACS Standard/ProVoice*\n");
    printf ("  -fH             Decode only EDACS Standard/ProVoice with ESK 0xA0*\n");
@@ -1531,6 +1680,8 @@
    printf ("  -fe             Decode only EDACS EA/ProVoice*\n");
    printf ("  -fE             Decode only EDACS EA/ProVoice with ESK 0xA0*\n");
    printf ("  -fm             Decode only dPMR*\n");
+   printf ("  -fT             Decode only TETRA* (optional CC filter: -fT0 to -fT63)\n");
+   printf ("  -fP             Decode only APRS* (1200-baud AFSK / 9600-baud FSK AX.25)\n");
    printf ("  -l            Disable DMR, dPMR, NXDN, M17 input filtering\n");
   //  printf ("  -u <num>      Unvoiced speech quality (default=3)\n");
    printf ("  -xx           Expect non-inverted X2-TDMA signal\n");
@@ -1587,6 +1738,11 @@
    printf ("  -H <hex>      Manually Enter Hytera OTA Encryption 32 Char Hex Key (see example below)\n");
    printf ("                 -H O:0:0 no keystream application, but check for Hytera OTA Encryption and DMRA EP Late Entry IV.\n");
    printf ("                 -H O:128:17bfe59b29a06136fb7d3811fd1a4904 for 128-bit RC4 OTA Key Setup\n");
+   printf ("\n");
+   printf ("  -H <hex>      Manually Enter TETRA TEA1 (20 Char) or TEA2/TEA3/TEA4 (32 Char) Hex Key (see example below)\n");
+   printf ("                 Encapulate in Single Quotation Marks; Space every 16 chars (or contiguous hex string).\n");
+   printf ("                 -H '0123456789ABCDEF 0123' \n");
+   printf ("                 -H '736B9A9C5645288B 243AD5CB8701EF8A' \n");
    printf ("\n");
    printf ("  -R <dec>      Manually Enter dPMR or NXDN EHR Scrambler Key Value (Decimal Value)\n");
    printf ("                 \n");
@@ -1704,8 +1860,16 @@
    }
    else if (opts->audio_gain == 0)
    {
-     state->aout_gain  = 15.0f;
-     state->aout_gainR = 15.0f;
+     if (ambe_hw_is_active())
+     {
+       state->aout_gain  = 25.0f;
+       state->aout_gainR = 25.0f;
+     }
+     else
+     {
+       state->aout_gain  = 15.0f;
+       state->aout_gainR = 15.0f;
+     }
    }
  
  #ifdef USE_RTLSDR
@@ -1739,12 +1903,12 @@
 
   //push a DSD-FME started event so users can see what this section does, and also gives users an idea of when context started
   state->event_history_s[0].Event_History_Items[0].color_pair = 4;
-  watchdog_event_datacall (opts, state, 0, 0, "Any decoded voice calls or data calls display here;", 0);
-  push_event_history (&state->event_history_s[0]);
+  // watchdog_event_datacall (opts, state, 0, 0, "Any decoded voice calls or data calls display here;", 0);
+  // push_event_history (&state->event_history_s[0]);
   init_event_history (&state->event_history_s[0], 0, 1);
   state->event_history_s[0].Event_History_Items[0].color_pair = 4;
-  watchdog_event_datacall (opts, state, 0, 0, "DSD-FME Started and Event History Initialized;", 0);
-  push_event_history (&state->event_history_s[0]);
+  // watchdog_event_datacall (opts, state, 0, 0, "DSD-FME Started and Event History Initialized;", 0);
+  // push_event_history (&state->event_history_s[0]);
   init_event_history (&state->event_history_s[0], 0, 1);
 
   if (opts->event_out_file[0] != 0)
@@ -1789,9 +1953,37 @@
  
  
  
+       int unverified_dmr_slots = 0;
        while (state->synctype != -1)
          {
            processFrame (opts, state);
+
+           if (state->dmr_unconfirmed_sync == 1)
+           {
+             state->last_cc_sync_time = state->dmr_unconfirmed_cc_sync_time;
+             state->last_vc_sync_time = state->dmr_unconfirmed_vc_sync_time;
+             state->dmr_unconfirmed_sync = 0;
+           }
+ 
+           long int cur_f = ((opts->p25_trunk == 1 || opts->scanner_mode == 1) && opts->p25_is_tuned == 0 && state->lcn_freq_count > 0)
+                            ? trunk_get_current_freq(opts, state) : 0;
+           int not_on_imported = (cur_f > 0 && !trunk_is_imported_freq(state, cur_f));
+           int on_cap_plus_rest = (state->dmr_rest_channel != -1 &&
+                                   (opts->p25_is_tuned == 0 || state->p25_vc_freq[0] == 0 || state->p25_vc_freq[0] == state->p25_cc_freq));
+           time_t hangtime_limit = on_cap_plus_rest
+                                   ? (opts->trunk_hangtime + 4)
+                                   : opts->trunk_hangtime;
+           int can_hunt_or_return = (opts->scanner_mode == 1) ||
+                                    (opts->p25_trunk == 1 && (opts->p25_is_tuned == 1 || state->dmr_rest_channel != -1 || state->lcn_freq_count > 0));
+           if ((state->synctype == 10 || state->synctype == 13) && state->color_code_ok == 0)
+             unverified_dmr_slots++;
+           else
+             unverified_dmr_slots = 0;
+           if (not_on_imported || (unverified_dmr_slots != 1 && can_hunt_or_return && ((time(NULL) - state->last_cc_sync_time) > hangtime_limit)))
+           {
+             state->synctype = -1;
+             break;
+           }
  
  #ifdef TRACE_DSD
            state->debug_prefix = 'S';
@@ -1829,6 +2021,14 @@
    codec2_destroy(state->codec2_1600);
    codec2_destroy(state->codec2_3200);
    #endif
+
+   if (opts != NULL && opts->frame_aprs == 1)
+   {
+     while (aprs_check_sync(opts, state))
+     {
+       processAPRS(opts, state);
+     }
+   }
 
    //watchdog event at this point
     watchdog_event_history(opts, state, 0);
@@ -1894,6 +2094,7 @@
    if (opts->mbe_out_fR != NULL) closeMbeOutFileR (opts, state);
  
    fprintf (stderr,"\n");
+   ambe_hw_close();
    fprintf (stderr,"Total audio errors: %i\n", state->debug_audio_errors);
    fprintf (stderr,"Total header errors: %i\n", state->debug_header_errors);
    fprintf (stderr,"Total irrecoverable header errors: %i\n", state->debug_header_critical_errors);
@@ -1957,7 +2158,9 @@
    fprintf (stderr,"CODEC2 Support Enabled\n");
    #endif
  
-   initOpts (&opts);
+   memset (&opts, 0, sizeof(opts));
+  memset (&state, 0, sizeof(state));
+  initOpts (&opts);
    initState (&state);
    init_audio_filters(&state); //audio filters
    init_rrc_filter_memory(); //initialize input filtering
@@ -2256,6 +2459,9 @@
  
          case 'q': //New letter assignment for Reverse Mute, flow down to allow temp numbers
            opts.reverse_mute = 1;
+           opts.unmute_encrypted_p25 = 1;
+           opts.dmr_mute_encL = 0;
+           opts.dmr_mute_encR = 0;
            fprintf (stderr, "Reverse Mute\n");
            break;
  
@@ -2298,13 +2504,6 @@
            {
             state.K = 256;
            }
-           opts.dmr_mute_encL = 0;
-           opts.dmr_mute_encR = 0;
-           if (state.K == 0)
-           {
-             opts.dmr_mute_encL = 1;
-             opts.dmr_mute_encR = 1;
-           }
            break;
  
          case 'R':
@@ -2337,23 +2536,49 @@
            {
             strncpy(opts.szNumbers, optarg, 1023);
             opts.szNumbers[1023] = '\0';
-            state.K1 = strtoull (opts.szNumbers, &pEnd, 16);
-            state.K2 = strtoull (pEnd, &pEnd, 16);
-            state.K3 = strtoull (pEnd, &pEnd, 16);
-            state.K4 = strtoull (pEnd, &pEnd, 16);
-            if (state.K2 == 0 && state.K3 == 0 && state.K4 == 0)
+            int has_space = (strchr(opts.szNumbers, ' ') != NULL);
+            size_t hex_len = 0;
+            if (!has_space)
+            {
+              while ((opts.szNumbers[hex_len] >= '0' && opts.szNumbers[hex_len] <= '9') ||
+                     (opts.szNumbers[hex_len] >= 'a' && opts.szNumbers[hex_len] <= 'f') ||
+                     (opts.szNumbers[hex_len] >= 'A' && opts.szNumbers[hex_len] <= 'F'))
+              {
+                hex_len++;
+              }
+            }
+            if (!has_space && hex_len > 16)
+            {
+              char chunk[17];
+              state.K1 = state.K2 = state.K3 = state.K4 = 0;
+              for (int c = 0; c < 4 && (size_t)(c * 16) < hex_len; c++)
+              {
+                size_t rem = hex_len - (size_t)(c * 16);
+                size_t clen = (rem > 16) ? 16 : rem;
+                memcpy(chunk, &opts.szNumbers[c * 16], clen);
+                chunk[clen] = '\0';
+                unsigned long long val = strtoull(chunk, NULL, 16);
+                if (c == 0) state.K1 = val;
+                else if (c == 1) state.K2 = val;
+                else if (c == 2) state.K3 = val;
+                else if (c == 3) state.K4 = val;
+              }
+            }
+            else
+            {
+              state.K1 = strtoull (opts.szNumbers, &pEnd, 16);
+              state.K2 = strtoull (pEnd, &pEnd, 16);
+              state.K3 = strtoull (pEnd, &pEnd, 16);
+              state.K4 = strtoull (pEnd, &pEnd, 16);
+            }
+            if (hex_len == 20 || (state.K1 != 0 && state.K2 != 0 && (state.K2 & 0xFFFFFFFFFFFF0000ULL) == 0 && state.K3 == 0 && state.K4 == 0))
+              fprintf (stderr, "TETRA 80-bit TEA Key = %016llX %04llX\n", state.K1, state.K2 & 0xFFFFULL);
+            else if (state.K2 == 0 && state.K3 == 0 && state.K4 == 0)
               fprintf (stderr, "Hytera BP 40-bit Key: %010llX\n", state.K1);
             else if (state.K2 != 0 && state.K3 == 0 && state.K4 == 0)
               fprintf (stderr, "Multi 128-bit Key: %016llX%016llX\n", state.K1, state.K2);
             else
               fprintf (stderr, "Multi 256-bit Key: %016llX%016llX%016llX%016llX\n", state.K1, state.K2, state.K3, state.K4);
-            opts.dmr_mute_encL = 0;
-            opts.dmr_mute_encR = 0;
-            if (state.K1 == 0 && state.K2 == 0 && state.K3 == 0 && state.K4 == 0)
-            {
-              opts.dmr_mute_encL = 1;
-              opts.dmr_mute_encR = 1;
-            }
             state.H = state.K1; //shim still required?
             //load the AES keys into a seperate handler
             state.A1[0] = state.A1[1] = state.K1;
@@ -2518,7 +2743,9 @@
            break;
  
          case 'f':
-           if (optarg[0] == 'a') //
+           opts.frame_tetra = 0;
+           opts.frame_aprs = 0;
+           if (optarg[0] == 'a' && strncmp(optarg, "aprs", 4) != 0) //
            {
              opts.frame_dstar = 1;
              opts.frame_x2tdma = 1;
@@ -2855,6 +3082,15 @@
              // opts.use_heuristics = 1; //Causes issues with Voice Wide
              sprintf (opts.output_name, "P25p1");
              fprintf (stderr,"Decoding only P25 Phase 1 frames.\n");
+             if (optarg[1] != 0)
+             {
+               int nac_val = -1;
+               if (sscanf(&optarg[1], "%x", &nac_val) == 1 && nac_val >= 0 && nac_val <= 0xFFF)
+               {
+                 opts.p25_nac_filter = nac_val;
+                 fprintf (stderr, "P25 NAC Filter set to %03X\n", opts.p25_nac_filter);
+               }
+             }
            }
            else if (optarg[0] == 'i')
            {
@@ -2884,6 +3120,15 @@
              sprintf (opts.output_name, "NXDN48");
              fprintf (stderr,"Setting symbol rate to 2400 / second\n");
              fprintf (stderr,"Decoding only NXDN 4800 baud frames.\n");
+             if (optarg[1] >= '0' && optarg[1] <= '9')
+             {
+               int ran_val = atoi(&optarg[1]);
+               if (ran_val >= 0 && ran_val <= 63)
+               {
+                 opts.nxdn_ran_filter = ran_val;
+                 fprintf (stderr, "NXDN RAN Filter set to %02d\n", opts.nxdn_ran_filter);
+               }
+             }
              #ifdef NXDN_OLD_SYNC
              //
              #else
@@ -2941,6 +3186,15 @@
              // opts.setmod_bw = 12000;
              sprintf (opts.output_name, "P25p2");
              fprintf (stderr,"Decoding 6000 sps P25p2 frames only!\n");
+             if (optarg[1] != 0)
+             {
+               int nac_val = -1;
+               if (sscanf(&optarg[1], "%x", &nac_val) == 1 && nac_val >= 0 && nac_val <= 0xFFF)
+               {
+                 opts.p25_nac_filter = nac_val;
+                 fprintf (stderr, "P25 NAC Filter set to %03X\n", opts.p25_nac_filter);
+               }
+             }
              }
            else if (optarg[0] == 's')
            {
@@ -2968,9 +3222,18 @@
              sprintf (opts.output_name, "DMR");
  
              fprintf (stderr,"Decoding DMR BS/MS Simplex\n");
+             if (optarg[1] >= '0' && optarg[1] <= '9')
+             {
+               int cc_val = atoi(&optarg[1]);
+               if (cc_val >= 0 && cc_val <= 15)
+               {
+                 opts.dmr_cc_filter = cc_val;
+                 fprintf (stderr, "DMR Color Code Filter set to %02d\n", opts.dmr_cc_filter);
+               }
+             }
            }
            //change ft to only do P25 and DMR (TDMA trunking modes)
-           else if (optarg[0] == 't')
+           else if (optarg[0] == 't' && optarg[1] != 'e')
            {
              opts.frame_dstar = 0;
              opts.frame_x2tdma = 0;
@@ -3024,6 +3287,15 @@
              // opts.setmod_bw = 12000; //causing issues
              sprintf (opts.output_name, "NXDN96");
              fprintf (stderr,"Decoding only NXDN 9600 baud frames.\n");
+             if (optarg[1] >= '0' && optarg[1] <= '9')
+             {
+               int ran_val = atoi(&optarg[1]);
+               if (ran_val >= 0 && ran_val <= 63)
+               {
+                 opts.nxdn_ran_filter = ran_val;
+                 fprintf (stderr, "NXDN RAN Filter set to %02d\n", opts.nxdn_ran_filter);
+               }
+             }
              fprintf(stderr, "Notice: NXDN autodetect polarity disabled. \n Use -xn option if Inverted Signal expected.\n");
            }
            else if (optarg[0] == 'r')
@@ -3110,6 +3382,77 @@
  
              //disable RRC filter for now
              opts.use_cosine_filter = 0;
+           }
+           else if (optarg[0] == 'T' || strncmp(optarg, "tetra", 5) == 0)
+           {
+             opts.frame_dstar = 0;
+             opts.frame_x2tdma = 0;
+             opts.frame_p25p1 = 0;
+             opts.frame_p25p2 = 0;
+             opts.frame_nxdn48 = 0;
+             opts.frame_nxdn96 = 0;
+             opts.frame_dmr = 0;
+             opts.frame_provoice = 0;
+             opts.frame_dpmr = 0;
+             opts.frame_ysf = 0;
+             opts.frame_m17 = 0;
+             opts.frame_tetra = 1;
+             state.samplesPerSymbol = 3;
+             state.symbolCenter = 1;
+             opts.mod_c4fm = 0;
+             opts.mod_qpsk = 1;
+             opts.mod_gfsk = 0;
+             state.rf_mod = 1;
+             opts.pulse_digi_rate_out = 8000;
+             opts.pulse_digi_out_channels = 1;
+             opts.dmr_stereo = 0;
+             opts.dmr_mono = 0;
+             state.dmr_stereo = 0;
+             opts.rtl_bandwidth = 24;
+             opts.use_cosine_filter = 0;
+             sprintf (opts.output_name, "TETRA");
+             fprintf (stderr, "Setting symbol rate to 18000 / second (pi/4-DQPSK)\n");
+             fprintf (stderr, "Decoding only TETRA frames.\n");
+             if (optarg[0] == 'T' && optarg[1] >= '0' && optarg[1] <= '9')
+             {
+               int cc_val = atoi(&optarg[1]);
+               if (cc_val >= 0 && cc_val <= 63)
+               {
+                 opts.tetra_cc_filter = cc_val;
+                 fprintf (stderr, "TETRA Colour Code Filter set to %02d\n", opts.tetra_cc_filter);
+               }
+             }
+           }
+           else if (optarg[0] == 'P' || strncmp(optarg, "aprs", 4) == 0)
+           {
+             opts.frame_dstar = 0;
+             opts.frame_x2tdma = 0;
+             opts.frame_p25p1 = 0;
+             opts.frame_p25p2 = 0;
+             opts.frame_nxdn48 = 0;
+             opts.frame_nxdn96 = 0;
+             opts.frame_dmr = 0;
+             opts.frame_provoice = 0;
+             opts.frame_dpmr = 0;
+             opts.frame_ysf = 0;
+             opts.frame_m17 = 0;
+             opts.frame_tetra = 0;
+             opts.frame_aprs = 1;
+             state.samplesPerSymbol = 10;
+             state.symbolCenter = 4;
+             opts.mod_c4fm = 0;
+             opts.mod_qpsk = 0;
+             opts.mod_gfsk = 1;
+             state.rf_mod = 2;
+             opts.pulse_digi_rate_out = 8000;
+             opts.pulse_digi_out_channels = 1;
+             opts.dmr_stereo = 0;
+             opts.dmr_mono = 0;
+             state.dmr_stereo = 0;
+             opts.rtl_bandwidth = 12;
+             opts.use_cosine_filter = 0;
+             sprintf (opts.output_name, "APRS");
+             fprintf (stderr, "Decoding only APRS / AX.25 Packet frames (1200-baud Bell 202 AFSK / 9600-baud FSK).\n");
            }
            break;
          //don't mess with the modulations unless you really need to
@@ -3463,6 +3806,8 @@
        //string yeet
        parse_pulse_input_string(&opts, opts.audio_in_dev+5);
      }
+
+     trunk_init_access_code_lookup(&opts, &state);
  
      //UDP Socket Blaster Audio Output Setup
      if((strncmp(opts.audio_out_dev, "udp", 3) == 0))
@@ -3681,6 +4026,7 @@
  
      signal(SIGINT, handler);
      signal(SIGTERM, handler);
+     ambe_hw_init(&opts, &state);
  
      if (opts.playfiles == 1)
      {

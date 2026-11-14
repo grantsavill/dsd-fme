@@ -303,7 +303,7 @@ void openOSSOutput (dsd_opts * opts)
       //TODO: Multiple output returns based on 8k/1, 8k/2, or maybe 48k/1? (2,3,5)??
       if (opts->pulse_digi_out_channels == 2)
         opts->audio_out_type = 2; //2 for 2 channel 8k OSS 16-bit short output
-      else if (opts->frame_m17 == 1)
+      else if (opts->frame_m17 == 1 || opts->frame_tetra == 1)
         opts->audio_out_type = 2;
       else opts->audio_out_type = 5;
 
@@ -321,7 +321,13 @@ processAudio (dsd_opts * opts, dsd_state * state)
   int i, n;
   float aout_abs, max, gainfactor, gaindelta, maxbuf;
 
-  if (opts->audio_gain == (float) 0)
+  if (ambe_hw_was_frame_muted(0)) return;
+  if (ambe_hw_is_slot_hw_decoded(0) && opts->audio_gain == (float) 0)
+    {
+      state->aout_gain = (float) 25;
+      gaindelta = (float) 0;
+    }
+  else if (opts->audio_gain == (float) 0)
     {
       // detect max level
       max = 0;
@@ -468,7 +474,13 @@ processAudioR (dsd_opts * opts, dsd_state * state)
 
   int i, n;
   float aout_abs, max, gainfactor, gaindelta, maxbuf;
-  if (opts->audio_gainR == (float) 0)
+  if (ambe_hw_was_frame_muted(1)) return;
+  if (ambe_hw_is_slot_hw_decoded(1) && opts->audio_gainR == (float) 0)
+    {
+      state->aout_gainR = (float) 25;
+      gaindelta = (float) 0;
+    }
+  else if (opts->audio_gainR == (float) 0)
     {
       // detect max level
       max = 0;
@@ -608,6 +620,7 @@ processAudioR (dsd_opts * opts, dsd_state * state)
 
 void writeSynthesizedVoice (dsd_opts * opts, dsd_state * state)
 {
+  if (ambe_hw_was_frame_muted(0)) return;
   int n;
   short aout_buf[160];
   short *aout_buf_p;
@@ -636,6 +649,7 @@ void writeSynthesizedVoice (dsd_opts * opts, dsd_state * state)
 
 void writeSynthesizedVoiceR (dsd_opts * opts, dsd_state * state)
 {
+  if (ambe_hw_was_frame_muted(1)) return;
   int n;
   short aout_buf[160];
   short *aout_buf_p;
@@ -665,6 +679,7 @@ void writeSynthesizedVoiceR (dsd_opts * opts, dsd_state * state)
 //short Mono to Stereo version for new static .wav files in stereo format for TDMA
 void writeSynthesizedVoiceMS (dsd_opts * opts, dsd_state * state)
 {
+  if (ambe_hw_was_frame_muted(0)) return;
   int n;
   short aout_buf[160];
   short *aout_buf_p;

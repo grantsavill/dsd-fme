@@ -68,7 +68,6 @@ void dmrMS (dsd_opts * opts, dsd_state * state)
   //so getDibit doesn't know to invert it before it gets here
 
   for (j = 0; j < 6; j++) {
-  state->dmrburstL = 16;
 
   memset (ambe_fr, 0, sizeof(ambe_fr));
   memset (ambe_fr2, 0, sizeof(ambe_fr2));
@@ -178,6 +177,7 @@ void dmrMS (dsd_opts * opts, dsd_state * state)
     power = emb_pdu[4];
     lcss = ((emb_pdu[5] << 1) + emb_pdu[6]);
     state->dmr_color_code = state->color_code = cc;
+    state->color_code_ok = 1;
   }
 
   //Continue Second AMBE Frame, 18 after Sync or EmbeddedSignalling
@@ -237,6 +237,50 @@ void dmrMS (dsd_opts * opts, dsd_state * state)
 
   state->dmr_ms_mode = 1;
 
+  if (opts->dmr_cc_filter >= 0 && opts->dmr_cc_filter <= 15 &&
+      state->color_code_ok == 1 && (int)state->dmr_color_code != opts->dmr_cc_filter)
+  {
+    trunk_check_rigctl_freq(opts, state);
+  }
+
+  if (opts->dmr_cc_filter >= 0 && opts->dmr_cc_filter <= 15 &&
+      state->color_code_ok == 1 && (int)state->dmr_color_code != opts->dmr_cc_filter)
+  {
+    if (state->dmr_unconfirmed_sync == 1)
+    {
+      state->last_cc_sync_time = state->dmr_unconfirmed_cc_sync_time;
+      state->last_vc_sync_time = state->dmr_unconfirmed_vc_sync_time;
+      state->dmr_unconfirmed_sync = 0;
+    }
+    if (state->dmrburstL == 16) state->dmrburstL = 17;
+    if (opts->mbe_out_f != NULL) closeMbeOutFile (opts, state);
+    memset (state->f_l4, 0, sizeof(state->f_l4));
+    memset (state->s_l4, 0, sizeof(state->s_l4));
+    memset (state->s_l4u, 0, sizeof(state->s_l4u));
+    memset (state->audio_out_temp_buf, 0, sizeof(state->audio_out_temp_buf));
+    memset (state->s_l, 0, sizeof(state->s_l));
+    memset (state->s_lu, 0, sizeof(state->s_lu));
+    if (opts->dmr_le != 2)
+    {
+      memcpy (m1, ambe_fr, sizeof(m1));
+      memcpy (m2, ambe_fr2, sizeof(m2));
+      memcpy (m3, ambe_fr3, sizeof(m3));
+      dmr_late_entry_mi_fragment (opts, state, vc, m1, m2, m3);
+    }
+    goto SKIP_MS_VOICE;
+  }
+
+  state->dmrburstL = 16;
+
+  if (state->color_code_ok == 1 || opts->dmr_cc_filter < 0 || opts->dmr_cc_filter > 15)
+    state->dmr_unconfirmed_sync = 0;
+  else if (state->dmr_unconfirmed_sync == 0)
+  {
+    state->dmr_unconfirmed_cc_sync_time = state->last_cc_sync_time;
+    state->dmr_unconfirmed_vc_sync_time = state->last_vc_sync_time;
+    state->dmr_unconfirmed_sync = 1;
+  }
+
   memcpy (ambe_fr4, ambe_fr2, sizeof(ambe_fr2));
 
   //copy ambe_fr frames first, running process mbe will correct them,
@@ -273,6 +317,15 @@ void dmrMS (dsd_opts * opts, dsd_state * state)
   ambe2_codeword_print_i(opts, ambe_fr3);
   #endif
 
+  if (vc == 6)
+  {
+    //this needs to run prior to embedded link control
+    if (state->payload_algid == 0x02)
+      hytera_enhanced_alg_refresh(state);
+
+    dmr_data_burst_handler(opts, state, (uint8_t *)dummy_bits, 0xEB);
+  }
+
   processMbeFrame (opts, state, NULL, ambe_fr, NULL);
     memcpy(state->f_l4[0], state->audio_out_temp_buf, sizeof(state->audio_out_temp_buf));
     memcpy(state->s_l4[0], state->s_l, sizeof(state->s_l));
@@ -287,27 +340,26 @@ void dmrMS (dsd_opts * opts, dsd_state * state)
     memcpy(state->s_l4u[2], state->s_lu, sizeof(state->s_lu));
 
   //TODO: Consider copying f_l to f_r for left and right channel saturation on MS mode
-  if (opts->floating_point == 0)
+  if (opts->dmr_cc_filter < 0 || opts->dmr_cc_filter > 15 ||
+      state->color_code_ok == 0 || (int)state->dmr_color_code == opts->dmr_cc_filter)
   {
-    // memcpy (state->s_r4, state->s_l4, sizeof(state->s_l4));
-    if(opts->pulse_digi_out_channels == 2)
-      playSynthesizedVoiceSS3(opts, state);
-  }
+    if (opts->floating_point == 0)
+    {
+      // memcpy (state->s_r4, state->s_l4, sizeof(state->s_l4));
+      if(opts->pulse_digi_out_channels == 2)
+        playSynthesizedVoiceSS3(opts, state);
+    }
 
-  if (opts->floating_point == 1)
-  {
-    // memcpy (state->f_r4, state->f_l4, sizeof(state->f_l4));
-    if(opts->pulse_digi_out_channels == 2)
-      playSynthesizedVoiceFS3(opts, state);
+    if (opts->floating_point == 1)
+    {
+      // memcpy (state->f_r4, state->f_l4, sizeof(state->f_l4));
+      if(opts->pulse_digi_out_channels == 2)
+        playSynthesizedVoiceFS3(opts, state);
+    }
   }
 
   if (vc == 6)
   {
-    //this needs to run prior to embedded link control
-    if (state->payload_algid == 0x02)
-        hytera_enhanced_alg_refresh(state);
-    
-    dmr_data_burst_handler(opts, state, (uint8_t *)dummy_bits, 0xEB);
     //check the single burst/reverse channel opportunity
     dmr_sbrc (opts, state, power);
 
@@ -323,8 +375,10 @@ void dmrMS (dsd_opts * opts, dsd_state * state)
   // cach_err = dmr_cach (opts, state, cachdata);
 
   //update voice sync time for trunking purposes (particularly Con+)
+  state->last_cc_sync_time = time(NULL);
   state->last_vc_sync_time = time(NULL);
 
+  SKIP_MS_VOICE:
   vc++;
 
   //reset emb components
@@ -350,6 +404,12 @@ void dmrMS (dsd_opts * opts, dsd_state * state)
  } // end loop
 
  END:
+ if (state->dmr_unconfirmed_sync == 1)
+ {
+   state->last_cc_sync_time = state->dmr_unconfirmed_cc_sync_time;
+   state->last_vc_sync_time = state->dmr_unconfirmed_vc_sync_time;
+   state->dmr_unconfirmed_sync = 0;
+ }
  //get first half payload dibits and store them in the payload for the next repitition
  skipDibit (opts, state, 144); //should we have two of these?
 
@@ -368,6 +428,16 @@ void dmrMS (dsd_opts * opts, dsd_state * state)
  state->dmr_stereo = 0;
  state->dmr_ms_mode = 0;
  state->directmode = 0; //flag off
+ if (emb_ok != 1)
+ {
+   if (state->dmr_unconfirmed_sync == 1)
+   {
+     state->last_cc_sync_time = state->dmr_unconfirmed_cc_sync_time;
+     state->last_vc_sync_time = state->dmr_unconfirmed_vc_sync_time;
+     state->dmr_unconfirmed_sync = 0;
+   }
+   state->color_code_ok = 0;
+ }
 
  if (timestr != NULL)
  {
@@ -412,7 +482,6 @@ void dmrMSBootstrap (dsd_opts * opts, dsd_state * state)
   char cachdata[25];
   UNUSED(cachdata);
 
-  state->dmrburstL = 16;
   state->currentslot = 0; //force to slot 0
 
   dibit_p = state->dmr_payload_p - 90;
@@ -556,11 +625,55 @@ void dmrMSBootstrap (dsd_opts * opts, dsd_state * state)
   if (state->dmr_color_code != 16)
     fprintf (stderr, "| Color Code=%02d ", state->dmr_color_code);
   else fprintf (stderr, "| Color Code=XX ");
+  if (opts->dmr_cc_filter >= 0 && opts->dmr_cc_filter <= 15 &&
+      state->color_code_ok == 1 && (int)state->dmr_color_code != opts->dmr_cc_filter)
+  {
+    trunk_check_rigctl_freq(opts, state);
+  }
+
+  if (opts->dmr_cc_filter >= 0 && opts->dmr_cc_filter <= 15 &&
+      state->color_code_ok == 1 && (int)state->dmr_color_code != opts->dmr_cc_filter)
+  {
+    if (state->dmr_unconfirmed_sync == 1)
+    {
+      state->last_cc_sync_time = state->dmr_unconfirmed_cc_sync_time;
+      state->last_vc_sync_time = state->dmr_unconfirmed_vc_sync_time;
+      state->dmr_unconfirmed_sync = 0;
+    }
+    if (state->dmrburstL == 16) state->dmrburstL = 17;
+    if (opts->mbe_out_f != NULL) closeMbeOutFile (opts, state);
+    fprintf (stderr, "| VC* [CC FILTER: %02d]\n", opts->dmr_cc_filter);
+    memset (state->f_l4, 0, sizeof(state->f_l4));
+    memset (state->s_l4, 0, sizeof(state->s_l4));
+    memset (state->s_l4u, 0, sizeof(state->s_l4u));
+    memset (state->audio_out_temp_buf, 0, sizeof(state->audio_out_temp_buf));
+    memset (state->s_l, 0, sizeof(state->s_l));
+    memset (state->s_lu, 0, sizeof(state->s_lu));
+    dmr_alg_reset (opts, state);
+    if (opts->dmr_le != 2)
+    {
+      memcpy (m1, ambe_fr, sizeof(m1));
+      memcpy (m2, ambe_fr2, sizeof(m2));
+      memcpy (m3, ambe_fr3, sizeof(m3));
+      dmr_late_entry_mi_fragment (opts, state, 1, m1, m2, m3);
+    }
+    goto SKIP_MS_BOOT;
+  }
+  state->dmrburstL = 16;
   fprintf (stderr, "| VC* ");
   fprintf (stderr, "\n");
+  if (opts->dmr_cc_filter >= 0 && opts->dmr_cc_filter <= 15 &&
+      state->color_code_ok == 0 && state->dmr_unconfirmed_sync == 0)
+  {
+    state->dmr_unconfirmed_cc_sync_time = state->last_cc_sync_time;
+    state->dmr_unconfirmed_vc_sync_time = state->last_vc_sync_time;
+    state->dmr_unconfirmed_sync = 1;
+  }
+  state->last_cc_sync_time = time(NULL);
+  state->last_vc_sync_time = time(NULL);
 
   //alg reset
-  //dmr_alg_reset (opts, state);
+  dmr_alg_reset (opts, state);
 
   memcpy (ambe_fr4, ambe_fr2, sizeof(ambe_fr2));
 
@@ -612,18 +725,22 @@ void dmrMSBootstrap (dsd_opts * opts, dsd_state * state)
     memcpy(state->s_l4u[2], state->s_lu, sizeof(state->s_lu));
 
   //TODO: Consider copying f_l to f_r for left and right channel saturation on MS mode
-  if (opts->floating_point == 0)
+  if (opts->dmr_cc_filter < 0 || opts->dmr_cc_filter > 15 ||
+      state->color_code_ok == 0 || (int)state->dmr_color_code == opts->dmr_cc_filter)
   {
-    // memcpy (state->s_r4, state->s_l4, sizeof(state->s_l4));
-    if(opts->pulse_digi_out_channels == 2)
-      playSynthesizedVoiceSS3(opts, state);
-  }
+    if (opts->floating_point == 0)
+    {
+      // memcpy (state->s_r4, state->s_l4, sizeof(state->s_l4));
+      if(opts->pulse_digi_out_channels == 2)
+        playSynthesizedVoiceSS3(opts, state);
+    }
 
-  if (opts->floating_point == 1)
-  {
-    // memcpy (state->f_r4, state->f_l4, sizeof(state->f_l4));
-    if(opts->pulse_digi_out_channels == 2)
-      playSynthesizedVoiceFS3(opts, state);
+    if (opts->floating_point == 1)
+    {
+      // memcpy (state->f_r4, state->f_l4, sizeof(state->f_l4));
+      if(opts->pulse_digi_out_channels == 2)
+        playSynthesizedVoiceFS3(opts, state);
+    }
   }
 
   //collect the mi fragment
@@ -632,6 +749,7 @@ void dmrMSBootstrap (dsd_opts * opts, dsd_state * state)
 
   //errors due to skipping other slot
   // cach_err = dmr_cach (opts, state, cachdata);
+  SKIP_MS_BOOT:
   if (timestr != NULL)
   {
     free (timestr);
@@ -646,8 +764,6 @@ void dmrMSBootstrap (dsd_opts * opts, dsd_state * state)
 //simplied to a simple data collector, and then passed on to dmr_data_sync for the usual processing
 void dmrMSData (dsd_opts * opts, dsd_state * state)
 {
-
-  char * timestr = getTimeC();
 
   int i;
   int dibit;
@@ -670,16 +786,6 @@ void dmrMSData (dsd_opts * opts, dsd_state * state)
     state->dmr_stereo_payload[i+90] = dibit;
   }
 
-  fprintf (stderr, "%s ", timestr);
-  if (opts->inverted_dmr == 0)
-  {
-    fprintf (stderr,"Sync: +DMR MS/DM MODE/MONO ");
-  }
-  else fprintf (stderr,"Sync: -DMR MS/DM MODE/MONO ");
-  if (state->dmr_color_code != 16)
-    fprintf (stderr, "| Color Code=%02d ", state->dmr_color_code);
-  else fprintf (stderr, "| Color Code=XX ");
-
   sprintf(state->slot1light, "%s", "");
   sprintf(state->slot2light, "%s", "");
 
@@ -693,6 +799,18 @@ void dmrMSData (dsd_opts * opts, dsd_state * state)
   state->dmr_ms_mode = 0;
   state->directmode = 0; //flag off
 
+  if (state->dmr_unconfirmed_sync == 1)
+  {
+    state->last_cc_sync_time = state->dmr_unconfirmed_cc_sync_time;
+    state->last_vc_sync_time = state->dmr_unconfirmed_vc_sync_time;
+    state->dmr_unconfirmed_sync = 0;
+  }
+
+  if (opts->dmr_cc_filter >= 0 && opts->dmr_cc_filter <= 15 && state->color_code_ok == 0)
+  {
+    return;
+  }
+
   //should just be loaded in the dmr_payload_buffer instead now
   //but we want to run getDibit so the buffer has actual good values in it
   for (i = 0; i < 144; i++) //66
@@ -705,12 +823,6 @@ void dmrMSData (dsd_opts * opts, dsd_state * state)
   {
     dibit = getDibit(opts, state);
     state->dmr_stereo_payload[i+66] = 1; ////set to one so first frame will fail intentionally instead of zero fill
-  }
-
-  if (timestr != NULL)
-  {
-    free (timestr);
-    timestr = NULL;
   }
 
 }

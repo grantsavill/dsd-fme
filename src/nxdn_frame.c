@@ -324,7 +324,12 @@ void nxdn_frame (dsd_opts * opts, dsd_state * state)
 
 	//enable these after good lich parity and known lich value
 	state->carrier = 1;
-	state->last_cc_sync_time = time(NULL);
+	if (opts->nxdn_ran_filter < 0 || opts->nxdn_ran_filter > 63 ||
+	    (int)state->nxdn_last_ran < 0 ||
+	    (int)state->nxdn_last_ran == opts->nxdn_ran_filter)
+	{
+		state->last_cc_sync_time = time(NULL);
+	}
 
 	//debug polarity (purely illustative, shows how frequently false sync can be attributed to wrong polarity)
 	#ifdef NXDN_DEBUG_LICH
@@ -492,7 +497,10 @@ void nxdn_frame (dsd_opts * opts, dsd_state * state)
 
 #endif //end LIMAZULUTWEAKS
 
-	if (opts->scanner_mode == 1)
+	if (opts->scanner_mode == 1 &&
+	    (opts->nxdn_ran_filter < 0 || opts->nxdn_ran_filter > 63 ||
+	     (int)state->nxdn_last_ran < 0 ||
+	     (int)state->nxdn_last_ran == opts->nxdn_ran_filter))
 		state->last_cc_sync_time = time(NULL) + 2; //add a little extra hangtime between resuming scan
 
 	//Option/Steal Flags echoed in Voice, V+F, or Data
@@ -597,12 +605,23 @@ void nxdn_frame (dsd_opts * opts, dsd_state * state)
 	if (pich_tch & 2) dcr_pich_tch(opts, state, facch_bits_b, lich);
 
 	//EHR only (TODO: Make an EFR mode? never observed)
+	if (voice && opts->nxdn_ran_filter >= 0 && opts->nxdn_ran_filter <= 63 &&
+	    (int)state->nxdn_last_ran >= 0 && (int)state->nxdn_last_ran <= 63 &&
+	    (int)state->nxdn_last_ran != opts->nxdn_ran_filter)
+	{
+		fprintf (stderr, " [RAN FILTER: %02d]", opts->nxdn_ran_filter);
+		memset (state->audio_out_temp_buf, 0, sizeof(state->audio_out_temp_buf));
+		memset (state->s_l, 0, sizeof(state->s_l));
+		memset (state->s_lu, 0, sizeof(state->s_lu));
+		voice = 0;
+	}
 	if (voice)
 	{
 		//restore MBE file open here
 		if ((opts->mbe_out_dir[0] != 0) && (opts->mbe_out_f == NULL)) openMbeOutFile (opts, state);
 		//update last voice sync time
 		state->last_vc_sync_time = time(NULL);
+		state->last_cc_sync_time = time(NULL);
 		//turn on scrambler if forced by user option
 		if (state->forced_alg_id == 1 && state->R != 0) state->nxdn_cipher_type = 0x1;
 		//process voice frame

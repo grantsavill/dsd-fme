@@ -16,7 +16,7 @@ Trunking Option Examples:
   -fs -i rtl:0:450M:0:-2:12 -T -C examples\dmr_t3_chan.csv -P -N -Z
 
   DMR Trunking with SDR++ input, RIGCTL, /dev/dsp output, RAS enabled CSBK (-F),
-  channel map import, per call wav files, ncurses terminal, payload dump to console
+  channel map import (with optional per-LSN Color Code in 3rd column), per call wav files, ncurses terminal, payload dump to console
   -fs -F -i tcp -U 4532 -T -C examples\capacity_plus_chan.csv -P -N -Z
 
   NXDN48 v2.0 DFA (Direct Frequency Assignment) Trunking with SDR++ input, RIGCTL, /dev/dsp output,
@@ -34,6 +34,16 @@ Trunking Option Examples:
   EDACS Extended Address Analog and Digital (with ESK)
   -fE -i tcp:192.168.7.5:7355 -U 4532 -T -C edacs_channel_map.csv -G group.csv -N
   -fE -i rtl:0:850M:44:-2:24 -T -C edacs_channel_map.csv -G group.csv -N
+
+  TETRA Control/Traffic Channel and Voice Decoding with RTL or SDR++ TCP input,
+  ncurses terminal, payload dump to console (optional Colour Code filter: -fT0 to -fT63)
+  -fT -i rtl:0:390.6375M:0:-2:24 -N -Z
+  -fT -i tcp:127.0.0.1:7355 -N -Z
+
+  APRS / AX.25 Packet Radio Decoding (1200-baud Bell 202 AFSK / 9600-baud G3RUH FSK)
+  with RTL or SDR++ TCP input, LRRP data output (-L), ncurses terminal, raw AX.25 hex dump (-Z)
+  -fP -i rtl:0:144.390M:26:0:12 -L lrrp.txt -N -Z
+  -fP -i tcp:127.0.0.1:7355 -L lrrp.txt -N -Z
 
 Scanning Option Examples:
 
@@ -95,3 +105,7 @@ Encryption Option Examples:
 
   NXDN48 with default /dev/dsp input and output, load scrambler keys from .csv file (decimal format)
   -fi -k dsd-fme\examples\nxdn_sc_key.csv
+
+  TETRA with SDR++ TCP input, use TEA1 (20 hex chars / 80-bit) or TEA2/TEA3/TEA4 (32 hex chars / 128-bit) key via -H
+  -fT -H '1122334455667788 9900' -i tcp:127.0.0.1:7355 -N
+  -fT -H '0102030405060708 090A0B0C0D0E0F10' -i tcp:127.0.0.1:7355 -N

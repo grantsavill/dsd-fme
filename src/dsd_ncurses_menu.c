@@ -23,14 +23,14 @@ int reset = 0;
 
 //testing a few things, going to put this into ncursesMenu
 #define WIDTH 36
-#define HEIGHT 25
+#define HEIGHT 27
 
 int startx = 0;
 int starty = 0;
 
 char *choicesc[] = {
   "Return",
-  "      ", //Save Decoded Audio WAV (Legacy Mode) //Disabled
+  "Toggle/Reconnect AMBE",
   "Save Signal to Symbol Capture Bin",
   "Toggle Muting Encrypted Traffic    ",
   "Save Per Call Decoded WAV",
@@ -62,13 +62,16 @@ char *choices[] = {
   "Decode NXDN96",
   "Decode DMR",
   "Decode YSF",
+  "Decode TETRA",
+  "Decode APRS",
   "Toggle Signal Inversion",
   "Key Entry",
   "Reset Event History",
   "Toggle Payloads to Console",
-  "Manually Set p2 Parameters", //16
+  "Manually Set p2 Parameters",
   "Input & Output Options",
   "LRRP Data to File",
+  "CC / RAN / NAC Filter",
   "Exit DSD-FME",
   };
 
@@ -241,10 +244,10 @@ void ncursesMenu (dsd_opts * opts, dsd_state * state)
     }
 
     //Input Output Options
-    if (choice == 18)
+    if (choice == 20)
     {
       //test making a new window while other window is open
-      test_win = newwin(HEIGHT-1, WIDTH+9, starty+5, startx+5);
+      test_win = newwin(HEIGHT-2, WIDTH+9, starty+5, startx+5);
       keypad(menu_win, FALSE);
       keypad(test_win, TRUE);
       mvprintw(0, 0, "Input & Output Options                            ");
@@ -291,6 +294,11 @@ void ncursesMenu (dsd_opts * opts, dsd_state * state)
         //   }
         //   openWavOutFile (opts, state);
         // }
+        if (choicec == 2)
+        {
+          ambe_hw_toggle(opts, state);
+          choicec = 18;
+        }
         if (choicec == 3)
         {
           //read in filename for symbol capture bin
@@ -307,25 +315,7 @@ void ncursesMenu (dsd_opts * opts, dsd_state * state)
         }
         if (choicec == 4)
         {
-          //toggle all mutes
-          if (opts->unmute_encrypted_p25 == 0)
-          {
-            opts->unmute_encrypted_p25 = 1;
-          }
-          else opts->unmute_encrypted_p25 = 0;
-
-          if (opts->dmr_mute_encL == 0)
-          {
-            opts->dmr_mute_encL = 1;
-          }
-          else opts->dmr_mute_encL = 0;
-
-          if (opts->dmr_mute_encR == 0)
-          {
-            opts->dmr_mute_encR = 1;
-          }
-          else opts->dmr_mute_encR = 0;
-
+          dsd_toggle_encrypted_mute(opts);
         }
         if (choicec == 5)
         {
@@ -506,12 +496,12 @@ void ncursesMenu (dsd_opts * opts, dsd_state * state)
 
           //retune dongle if frequency is not zero
           if (opts->rtlsdr_center_freq != 0)
-            rtl_dev_tune (opts, opts->rtlsdr_center_freq);
+            { if (opts->frame_tetra == 1) { tetra_release_voice_slot(opts, state, 1); tetra_reset_state(state); } rtl_dev_tune (opts, opts->rtlsdr_center_freq); }
           #endif
           choicec = 18;
         }
 
-        if (choicec == 8)
+        if (choicec == 8 && opts->frame_tetra == 0)
         {
           if (state->rf_mod == 0)
           {
@@ -531,7 +521,7 @@ void ncursesMenu (dsd_opts * opts, dsd_state * state)
           }
         }
 
-        if (choicec == 9)
+        if (choicec == 9 && opts->frame_tetra == 0)
         {
           if (state->rf_mod == 0)
           {
@@ -668,7 +658,11 @@ void ncursesMenu (dsd_opts * opts, dsd_state * state)
           noecho();
 
           opts->rigctl_sockfd = Connect(opts->rigctlhostname, opts->rigctlportno);
-          if (opts->rigctl_sockfd != 0) opts->use_rigctl = 1;
+          if (opts->rigctl_sockfd != 0)
+          {
+            opts->use_rigctl = 1;
+            trunk_init_access_code_lookup(opts, state);
+          }
           else opts->use_rigctl = 0;
         }
 
@@ -694,6 +688,7 @@ void ncursesMenu (dsd_opts * opts, dsd_state * state)
         if (choicec == 12)
         {
           //TODO: Add Closing of RAW files as well?
+          if (opts->frame_tetra == 1) tetra_release_voice_slot(opts, state, 1);
           opts->wav_out_f = close_and_rename_wav_file(opts->wav_out_f, opts->wav_out_file, opts->wav_out_dir, opts->wav_custom_tag, &state->event_history_s[0]);
           opts->wav_out_fR = close_and_rename_wav_file(opts->wav_out_fR, opts->wav_out_fileR, opts->wav_out_dir, opts->wav_custom_tag, &state->event_history_s[1]);
           opts->wav_out_file[0] = 0; //Bugfix for decoded wav file display after disabling
@@ -814,7 +809,7 @@ void ncursesMenu (dsd_opts * opts, dsd_state * state)
     }
 
     //Key Entry
-    if (choice == 14)
+    if (choice == 16)
     {
       state->payload_keyid = 0;
       state->payload_keyidR = 0;
@@ -837,8 +832,6 @@ void ncursesMenu (dsd_opts * opts, dsd_state * state)
       refresh();
       wscanw(entry_win, "%hd", &option); //%d
       noecho();
-      opts->dmr_mute_encL = 0;
-      opts->dmr_mute_encR = 0;
       if (option == 1)
       {
         state->K = 0;
@@ -860,48 +853,74 @@ void ncursesMenu (dsd_opts * opts, dsd_state * state)
         state->K2 = 0;
         state->K3 = 0;
         state->K4 = 0;
-        state->H = 0;
+        state->H = 0; opts->szNumbers[0] = 0;
 
+        char kbuf[128] = {0};
         entry_win = newwin(7, WIDTH+8, starty+10, startx+10);
         box (entry_win, 0, 0);
         mvwprintw(entry_win, 2, 2, " Enter **tera Privacy Key Value (HEX) ");
-        mvwprintw(entry_win, 3, 2, " 10 Char or First 16 for 32/64");
+        mvwprintw(entry_win, 3, 2, " 10/20/32/64 Char or First 16 Chars");
         mvwprintw(entry_win, 4, 3, " ");
         echo();
         refresh();
-        wscanw(entry_win, "%llX", &state->H);
-        noecho();
-        state->K1 = state->H;
-
-        entry_win = newwin(7, WIDTH+8, starty+10, startx+10);
-        box (entry_win, 0, 0);
-        mvwprintw(entry_win, 2, 2, " Enter **tera Privacy Key Value 2 (HEX) ");
-        mvwprintw(entry_win, 3, 2, " Second 16 Chars or Zero");
-        mvwprintw(entry_win, 4, 3, " ");
-        echo();
-        refresh();
-        wscanw(entry_win, "%llX", &state->K2);
+        wscanw(entry_win, "%127s", kbuf);
         noecho();
 
-        entry_win = newwin(7, WIDTH+8, starty+10, startx+10);
-        box (entry_win, 0, 0);
-        mvwprintw(entry_win, 2, 2, " Enter **tera Privacy Key Value 3 (HEX) ");
-        mvwprintw(entry_win, 3, 2, " Third 16 Chars or Zero");
-        mvwprintw(entry_win, 4, 3, " ");
-        echo();
-        refresh();
-        wscanw(entry_win, "%llX", &state->K3);
-        noecho();
+        size_t klen = strlen(kbuf);
+        if (klen > 16)
+        {
+          strncpy(opts->szNumbers, kbuf, 1023);
+          opts->szNumbers[1023] = '\0';
+          char chunk[17];
+          for (int c = 0; c < 4 && (size_t)(c * 16) < klen; c++)
+          {
+            size_t rem = klen - (size_t)(c * 16);
+            size_t clen = (rem > 16) ? 16 : rem;
+            memcpy(chunk, &kbuf[c * 16], clen);
+            chunk[clen] = '\0';
+            unsigned long long val = strtoull(chunk, NULL, 16);
+            if (c == 0) state->K1 = val;
+            else if (c == 1) state->K2 = val;
+            else if (c == 2) state->K3 = val;
+            else if (c == 3) state->K4 = val;
+          }
+          state->H = state->K1;
+        }
+        else
+        {
+          state->H = strtoull(kbuf, NULL, 16);
+          state->K1 = state->H;
 
-        entry_win = newwin(7, WIDTH+8, starty+10, startx+10);
-        box (entry_win, 0, 0);
-        mvwprintw(entry_win, 2, 2, " Enter **tera Privacy Key Value 4 (HEX) ");
-        mvwprintw(entry_win, 3, 2, " Fourth 16 Chars or Zero");
-        mvwprintw(entry_win, 4, 3, " ");
-        echo();
-        refresh();
-        wscanw(entry_win, "%llX", &state->K4);
-        noecho();
+          entry_win = newwin(7, WIDTH+8, starty+10, startx+10);
+          box (entry_win, 0, 0);
+          mvwprintw(entry_win, 2, 2, " Enter **tera Privacy Key Value 2 (HEX) ");
+          mvwprintw(entry_win, 3, 2, " Second 16 Chars or Zero");
+          mvwprintw(entry_win, 4, 3, " ");
+          echo();
+          refresh();
+          wscanw(entry_win, "%llX", &state->K2);
+          noecho();
+
+          entry_win = newwin(7, WIDTH+8, starty+10, startx+10);
+          box (entry_win, 0, 0);
+          mvwprintw(entry_win, 2, 2, " Enter **tera Privacy Key Value 3 (HEX) ");
+          mvwprintw(entry_win, 3, 2, " Third 16 Chars or Zero");
+          mvwprintw(entry_win, 4, 3, " ");
+          echo();
+          refresh();
+          wscanw(entry_win, "%llX", &state->K3);
+          noecho();
+
+          entry_win = newwin(7, WIDTH+8, starty+10, startx+10);
+          box (entry_win, 0, 0);
+          mvwprintw(entry_win, 2, 2, " Enter **tera Privacy Key Value 4 (HEX) ");
+          mvwprintw(entry_win, 3, 2, " Fourth 16 Chars or Zero");
+          mvwprintw(entry_win, 4, 3, " ");
+          echo();
+          refresh();
+          wscanw(entry_win, "%llX", &state->K4);
+          noecho();
+        }
 
         state->keyloader = 0; //turn off keyloader
       }
@@ -967,7 +986,7 @@ void ncursesMenu (dsd_opts * opts, dsd_state * state)
         state->K2 = 0;
         state->K3 = 0;
         state->K4 = 0;
-        state->H = 0;
+        state->H = 0; opts->szNumbers[0] = 0;
 
         memset (state->A1, 0, sizeof(state->A1));
         memset (state->A2, 0, sizeof(state->A2));
@@ -1069,6 +1088,9 @@ void ncursesMenu (dsd_opts * opts, dsd_state * state)
       opts->frame_provoice = 0;
       opts->frame_ysf = 1;
       opts->frame_m17 = 0;
+      if (opts->frame_tetra == 1) { tetra_release_voice_slot(opts, state, 1); tetra_reset_state(state); }
+      opts->frame_tetra = 0;
+      opts->frame_aprs = 0;
       opts->mod_c4fm = 1;
       opts->mod_qpsk = 0;
       opts->mod_gfsk = 0;
@@ -1091,7 +1113,7 @@ void ncursesMenu (dsd_opts * opts, dsd_state * state)
       opts->pulse_digi_out_channels = 1;
       opts->frame_dstar = 0;
       opts->frame_x2tdma = 0;
-      opts->frame_p25p1 = 0;
+      opts->frame_p25p1 = 0; opts->frame_p25p2 = 0;
       opts->frame_p25p2 = 0;
       opts->frame_nxdn48 = 0;
       opts->frame_nxdn96 = 0;
@@ -1100,6 +1122,9 @@ void ncursesMenu (dsd_opts * opts, dsd_state * state)
       opts->frame_provoice = 1;
       opts->frame_ysf = 0;
       opts->frame_m17 = 0;
+      if (opts->frame_tetra == 1) { tetra_release_voice_slot(opts, state, 1); tetra_reset_state(state); }
+      opts->frame_tetra = 0;
+      opts->frame_aprs = 0;
       opts->mod_c4fm = 0;
       opts->mod_qpsk = 0;
       opts->mod_gfsk = 1;
@@ -1120,7 +1145,7 @@ void ncursesMenu (dsd_opts * opts, dsd_state * state)
       opts->pulse_digi_out_channels = 1;
       opts->frame_dstar = 1;
       opts->frame_x2tdma = 0;
-      opts->frame_p25p1 = 0;
+      opts->frame_p25p1 = 0; opts->frame_p25p2 = 0;
       opts->frame_p25p2 = 0;
       opts->frame_nxdn48 = 0;
       opts->frame_nxdn96 = 0;
@@ -1129,6 +1154,9 @@ void ncursesMenu (dsd_opts * opts, dsd_state * state)
       opts->frame_provoice = 0;
       opts->frame_ysf = 0;
       opts->frame_m17 = 0;
+      if (opts->frame_tetra == 1) { tetra_release_voice_slot(opts, state, 1); tetra_reset_state(state); }
+      opts->frame_tetra = 0;
+      opts->frame_aprs = 0;
       opts->mod_c4fm = 1;
       opts->mod_qpsk = 0;
       opts->mod_gfsk = 0;
@@ -1167,6 +1195,9 @@ void ncursesMenu (dsd_opts * opts, dsd_state * state)
       opts->frame_provoice = 0;
       opts->frame_ysf = 0;
       opts->frame_m17 = 0;
+      if (opts->frame_tetra == 1) { tetra_release_voice_slot(opts, state, 1); tetra_reset_state(state); }
+      opts->frame_tetra = 0;
+      opts->frame_aprs = 0;
       opts->mod_c4fm = 1;
       opts->mod_qpsk = 0;
       opts->mod_gfsk = 0;
@@ -1204,6 +1235,9 @@ void ncursesMenu (dsd_opts * opts, dsd_state * state)
       opts->frame_provoice = 0;
       opts->frame_ysf = 1;
       opts->frame_m17 = 0;
+      if (opts->frame_tetra == 1) { tetra_release_voice_slot(opts, state, 1); tetra_reset_state(state); }
+      opts->frame_tetra = 0;
+      opts->frame_aprs = 0;
       opts->mod_c4fm = 1;
       opts->mod_qpsk = 0;
       opts->mod_gfsk = 0;
@@ -1224,7 +1258,7 @@ void ncursesMenu (dsd_opts * opts, dsd_state * state)
       opts->frame_dmr = 0;
       opts->frame_dstar = 0;
       opts->frame_x2tdma = 0;
-      opts->frame_p25p1 = 0;
+      opts->frame_p25p1 = 0; opts->frame_p25p2 = 0;
       opts->frame_p25p2 = 1;
       opts->frame_nxdn48 = 0;
       opts->frame_nxdn96 = 0;
@@ -1232,6 +1266,9 @@ void ncursesMenu (dsd_opts * opts, dsd_state * state)
       opts->frame_provoice = 0;
       opts->frame_ysf = 0;
       opts->frame_m17 = 0;
+      if (opts->frame_tetra == 1) { tetra_release_voice_slot(opts, state, 1); tetra_reset_state(state); }
+      opts->frame_tetra = 0;
+      opts->frame_aprs = 0;
       opts->mod_c4fm = 1;
       opts->mod_qpsk = 0;
       opts->mod_gfsk = 0;
@@ -1252,7 +1289,7 @@ void ncursesMenu (dsd_opts * opts, dsd_state * state)
       opts->pulse_digi_out_channels = 1;
       opts->frame_dstar = 0;
       opts->frame_x2tdma = 0;
-      opts->frame_p25p1 = 0;
+      opts->frame_p25p1 = 0; opts->frame_p25p2 = 0;
       opts->frame_nxdn48 = 0;
       opts->frame_nxdn96 = 0;
       opts->frame_dmr = 0;
@@ -1260,6 +1297,9 @@ void ncursesMenu (dsd_opts * opts, dsd_state * state)
       opts->frame_provoice = 0;
       opts->frame_ysf = 0;
       opts->frame_m17 = 0;
+      if (opts->frame_tetra == 1) { tetra_release_voice_slot(opts, state, 1); tetra_reset_state(state); }
+      opts->frame_tetra = 0;
+      opts->frame_aprs = 0;
       opts->mod_c4fm = 1;
       opts->mod_qpsk = 0;
       opts->mod_gfsk = 0;
@@ -1283,7 +1323,7 @@ void ncursesMenu (dsd_opts * opts, dsd_state * state)
       opts->pulse_digi_out_channels = 1;
       opts->frame_dstar = 0;
       opts->frame_x2tdma = 0;
-      opts->frame_p25p1 = 0;
+      opts->frame_p25p1 = 0; opts->frame_p25p2 = 0;
       opts->frame_nxdn48 = 1;
       opts->frame_nxdn96 = 0;
       opts->frame_dmr = 0;
@@ -1291,9 +1331,12 @@ void ncursesMenu (dsd_opts * opts, dsd_state * state)
       opts->frame_provoice = 0;
       opts->frame_ysf = 0;
       opts->frame_m17 = 0;
+      if (opts->frame_tetra == 1) { tetra_release_voice_slot(opts, state, 1); tetra_reset_state(state); }
+      opts->frame_tetra = 0;
+      opts->frame_aprs = 0;
       opts->mod_c4fm = 1;
       //opts->unmute_encrypted_p25 = 0;
-      // opts->mod_qpsk = 0;
+      opts->mod_qpsk = 0; opts->mod_gfsk = 0; state->rf_mod = 0;
       // opts->mod_gfsk = 0;
       // state->rf_mod = 0;
     }
@@ -1311,7 +1354,7 @@ void ncursesMenu (dsd_opts * opts, dsd_state * state)
       opts->pulse_digi_out_channels = 1;
       opts->frame_dstar = 0;
       opts->frame_x2tdma = 0;
-      opts->frame_p25p1 = 0;
+      opts->frame_p25p1 = 0; opts->frame_p25p2 = 0;
       opts->frame_nxdn48 = 0;
       opts->frame_nxdn96 = 1;
       opts->frame_dmr = 0;
@@ -1319,6 +1362,9 @@ void ncursesMenu (dsd_opts * opts, dsd_state * state)
       opts->frame_provoice = 0;
       opts->frame_ysf = 0;
       opts->frame_m17 = 0;
+      if (opts->frame_tetra == 1) { tetra_release_voice_slot(opts, state, 1); tetra_reset_state(state); }
+      opts->frame_tetra = 0;
+      opts->frame_aprs = 0;
       opts->mod_c4fm = 1;
       opts->mod_qpsk = 0;
       opts->mod_gfsk = 0;
@@ -1340,7 +1386,7 @@ void ncursesMenu (dsd_opts * opts, dsd_state * state)
       opts->pulse_digi_out_channels = 2;
       opts->frame_dstar = 0;
       opts->frame_x2tdma = 0;
-      opts->frame_p25p1 = 0;
+      opts->frame_p25p1 = 0; opts->frame_p25p2 = 0;
       opts->frame_nxdn48 = 0;
       opts->frame_nxdn96 = 0;
       opts->frame_dmr = 1;
@@ -1348,6 +1394,9 @@ void ncursesMenu (dsd_opts * opts, dsd_state * state)
       opts->frame_provoice = 0;
       opts->frame_ysf = 0;
       opts->frame_m17 = 0;
+      if (opts->frame_tetra == 1) { tetra_release_voice_slot(opts, state, 1); tetra_reset_state(state); }
+      opts->frame_tetra = 0;
+      opts->frame_aprs = 0;
       opts->mod_c4fm = 1;
       opts->mod_qpsk = 0;
       opts->mod_gfsk = 0;
@@ -1368,7 +1417,7 @@ void ncursesMenu (dsd_opts * opts, dsd_state * state)
       opts->pulse_digi_out_channels = 1;
       opts->frame_dstar = 0;
       opts->frame_x2tdma = 0;
-      opts->frame_p25p1 = 0;
+      opts->frame_p25p1 = 0; opts->frame_p25p2 = 0;
       opts->frame_nxdn48 = 0;
       opts->frame_nxdn96 = 0;
       opts->frame_dmr = 0;
@@ -1376,6 +1425,9 @@ void ncursesMenu (dsd_opts * opts, dsd_state * state)
       opts->frame_provoice = 0;
       opts->frame_ysf = 1;
       opts->frame_m17 = 0;
+      if (opts->frame_tetra == 1) { tetra_release_voice_slot(opts, state, 1); tetra_reset_state(state); }
+      opts->frame_tetra = 0;
+      opts->frame_aprs = 0;
       opts->mod_c4fm = 1;
       opts->mod_qpsk = 0;
       opts->mod_gfsk = 0;
@@ -1395,7 +1447,7 @@ void ncursesMenu (dsd_opts * opts, dsd_state * state)
       opts->pulse_digi_out_channels = 1;
       opts->frame_dstar = 0;
       opts->frame_x2tdma = 0;
-      opts->frame_p25p1 = 0;
+      opts->frame_p25p1 = 0; opts->frame_p25p2 = 0;
       opts->frame_nxdn48 = 0;
       opts->frame_nxdn96 = 0;
       opts->frame_dmr = 0;
@@ -1403,6 +1455,9 @@ void ncursesMenu (dsd_opts * opts, dsd_state * state)
       opts->frame_provoice = 0;
       opts->frame_ysf = 0;
       opts->frame_m17 = 1;
+      if (opts->frame_tetra == 1) { tetra_release_voice_slot(opts, state, 1); tetra_reset_state(state); }
+      opts->frame_tetra = 0;
+      opts->frame_aprs = 0;
       opts->mod_c4fm = 1;
       opts->mod_qpsk = 0;
       opts->mod_gfsk = 0;
@@ -1410,31 +1465,80 @@ void ncursesMenu (dsd_opts * opts, dsd_state * state)
     }
     if (choice == 13)
     {
-      //Set all signal for inversion or uninversion
-      if (opts->inverted_dmr == 0)
-      {
-        opts->inverted_dmr = 1;
-        opts->inverted_dpmr = 1;
-        opts->inverted_x2tdma = 1;
-        opts->inverted_ysf = 1;
-      }
-      else
-      {
-        opts->inverted_dmr = 0;
-        opts->inverted_dpmr = 0;
-        opts->inverted_x2tdma = 0;
-        opts->inverted_ysf = 0;
-      }
-
+      //Decode TETRA
+      state->samplesPerSymbol = 3;
+      state->symbolCenter = 1;
+      sprintf (opts->output_name, "TETRA");
+      opts->dmr_mono = 0;
+      opts->dmr_stereo  = 0;
+      state->dmr_stereo = 0;
+      opts->pulse_digi_rate_out = 8000;
+      opts->pulse_digi_out_channels = 1;
+      opts->frame_dstar = 0;
+      opts->frame_x2tdma = 0;
+      opts->frame_p25p1 = 0; opts->frame_p25p2 = 0;
+      opts->frame_p25p2 = 0;
+      opts->frame_nxdn48 = 0;
+      opts->frame_nxdn96 = 0;
+      opts->frame_dmr = 0;
+      opts->frame_dpmr = 0;
+      opts->frame_provoice = 0;
+      opts->frame_ysf = 0;
+      opts->frame_m17 = 0;
+      tetra_release_voice_slot(opts, state, 1); tetra_reset_state(state);
+      opts->frame_tetra = 1; opts->rtl_bandwidth = 24;
+      opts->frame_aprs = 0;
+      opts->mod_c4fm = 0;
+      opts->mod_qpsk = 1;
+      opts->mod_gfsk = 0;
+      state->rf_mod = 1;
+      opts->use_cosine_filter = 0;
     }
-    if (choice == 15) //reset event history
+    if (choice == 14)
+    {
+      //Decode APRS
+      state->samplesPerSymbol = 10;
+      state->symbolCenter = 4;
+      sprintf (opts->output_name, "APRS");
+      opts->dmr_mono = 0;
+      opts->dmr_stereo  = 0;
+      state->dmr_stereo = 0;
+      opts->pulse_digi_rate_out = 8000;
+      opts->pulse_digi_out_channels = 1;
+      opts->frame_dstar = 0;
+      opts->frame_x2tdma = 0;
+      opts->frame_p25p1 = 0;
+      opts->frame_p25p2 = 0;
+      opts->frame_nxdn48 = 0;
+      opts->frame_nxdn96 = 0;
+      opts->frame_dmr = 0;
+      opts->frame_dpmr = 0;
+      opts->frame_provoice = 0;
+      opts->frame_ysf = 0;
+      opts->frame_m17 = 0;
+      if (opts->frame_tetra == 1) { tetra_release_voice_slot(opts, state, 1); tetra_reset_state(state); }
+      opts->frame_tetra = 0;
+      opts->frame_aprs = 1;
+      opts->analog_only = 0;
+      opts->rtl_bandwidth = 12;
+      opts->mod_c4fm = 0;
+      opts->mod_qpsk = 0;
+      opts->mod_gfsk = 1;
+      state->rf_mod = 2;
+      opts->use_cosine_filter = 0;
+    }
+    if (choice == 15)
+    {
+      dsd_toggle_signal_inversion(opts);
+    }
+    if (choice == 17) //reset event history
     {
       //initialize event history items (0 to 255)
       for (uint8_t i = 0; i < 2; i++)
         init_event_history(&state->event_history_s[i], 0, 255);
     }
 
-    if (choice == 16) //toggle payload printing
+    if (choice == 18) //toggle payload printing
     {
       if (opts->payload == 0)
       {
@@ -1447,7 +1551,7 @@ void ncursesMenu (dsd_opts * opts, dsd_state * state)
         fprintf(stderr, "Payload Off\n");
       }
     }
-    if (choice == 17)
+    if (choice == 19)
     {
       //hardset P2 WACN, SYSID, and NAC
       entry_win = newwin(6, WIDTH+16, starty+10, startx+10);
@@ -1500,7 +1604,7 @@ void ncursesMenu (dsd_opts * opts, dsd_state * state)
 
 
     }
-    if (choice == 19)
+    if (choice == 21)
     {
       short int lrrpchoice = 0;
       entry_win = newwin(10, WIDTH+16, starty+10, startx+10);
@@ -1521,12 +1625,12 @@ void ncursesMenu (dsd_opts * opts, dsd_state * state)
       {
         //find user home directory and append directory and filename.
         char * filename = "/lrrp.txt";
-        char * home_dir = getenv("HOME");
+        char * home_dir = getenv("HOME"); if (!home_dir) home_dir = getenv("USERPROFILE"); if (!home_dir) home_dir = ".";
         char * filepath = malloc(strlen(home_dir) + strlen(filename) + 1);
         strncpy (filepath, home_dir, strlen(home_dir) + 1);
         strncat (filepath, filename, strlen(filename) + 1);
         //assign home directory/filename to lrrp_out_file
-        sprintf (opts->lrrp_out_file, "%s", filepath); //double check make sure this still works
+        snprintf (opts->lrrp_out_file, sizeof(opts->lrrp_out_file), "%s", filepath); free(filepath);
         opts->lrrp_file_output = 1;
       }
 
@@ -1566,13 +1670,77 @@ void ncursesMenu (dsd_opts * opts, dsd_state * state)
         opts->lrrp_out_file[0] = 0;
       }
     }
-    if (choice == 20)
+    if (choice == 22)
+    {
+      int ftype = 0;
+      entry_win = newwin(11, WIDTH+18, starty+10, startx+10);
+      box (entry_win, 0, 0);
+      mvwprintw(entry_win, 2, 2, " Select Access Code Filter Type");
+      mvwprintw(entry_win, 3, 2, " 1 - DMR Color Code (0-15 dec)");
+      mvwprintw(entry_win, 4, 2, " 2 - NXDN RAN / Area (0-63 dec)");
+      mvwprintw(entry_win, 5, 2, " 3 - P25 NAC (000-FFF hex)");
+      mvwprintw(entry_win, 6, 2, " 4 - TETRA Colour Code (0-63 dec)");
+      mvwprintw(entry_win, 7, 2, " 5 - Disable All Filters");
+      mvwprintw(entry_win, 8, 3, " ");
+      echo();
+      refresh();
+      wscanw(entry_win, "%d", &ftype);
+      noecho();
+
+      if (ftype == 1 || ftype == 2 || ftype == 4)
+      {
+        const char *label = (ftype == 1) ? "DMR Color Code" :
+                            (ftype == 2) ? "NXDN RAN" : "TETRA Colour Code";
+        int max_val = (ftype == 1) ? 15 : 63;
+        int *target_flt = (ftype == 1) ? &opts->dmr_cc_filter :
+                          (ftype == 2) ? &opts->nxdn_ran_filter : &opts->tetra_cc_filter;
+        int val_input = -1;
+        entry_win = newwin(7, WIDTH+18, starty+10, startx+10);
+        box (entry_win, 0, 0);
+        mvwprintw(entry_win, 2, 2, " Enter %s Filter (0-%d)", label, max_val);
+        mvwprintw(entry_win, 3, 2, " (Enter -1 or %d to Disable Filter)", max_val + 1);
+        mvwprintw(entry_win, 4, 3, " ");
+        echo();
+        refresh();
+        wscanw(entry_win, "%d", &val_input);
+        noecho();
+        *target_flt = (val_input >= 0 && val_input <= max_val) ? val_input : -1;
+      }
+      else if (ftype == 3)
+      {
+        char nac_buf[16];
+        memset(nac_buf, 0, sizeof(nac_buf));
+        int nac_input = -1;
+        entry_win = newwin(7, WIDTH+18, starty+10, startx+10);
+        box (entry_win, 0, 0);
+        mvwprintw(entry_win, 2, 2, " Enter P25 NAC Filter in Hex (000-FFF)");
+        mvwprintw(entry_win, 3, 2, " (Enter -1 to Disable Filter)");
+        mvwprintw(entry_win, 4, 3, " ");
+        echo();
+        refresh();
+        wscanw(entry_win, "%15s", nac_buf);
+        noecho();
+        if (strcmp(nac_buf, "-1") != 0 && sscanf(nac_buf, "%x", &nac_input) == 1 && nac_input >= 0 && nac_input <= 0xFFF)
+          opts->p25_nac_filter = nac_input;
+        else
+          opts->p25_nac_filter = -1;
+      }
+      else if (ftype == 5)
+      {
+        opts->dmr_cc_filter = -1;
+        opts->nxdn_ran_filter = -1;
+        opts->p25_nac_filter = -1;
+        opts->tetra_cc_filter = -1;
+      }
+      state->dmr_unconfirmed_sync = 0;
+    }
+    if (choice == 23)
     {
       exitflag = 1;
       break;
     }
 
-		if(choice != 0 && choice != 20)	/* User did a choice come out of the infinite loop */
+		if(choice != 0 && choice != 23)	/* User did a choice come out of the infinite loop */
 			break;
 
 	}

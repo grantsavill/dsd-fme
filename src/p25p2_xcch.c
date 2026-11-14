@@ -97,8 +97,22 @@ void process_SACCH_MAC_PDU (dsd_opts * opts, dsd_state * state, int payload[180]
 		}
 	}
 
+	if (opts->p25_nac_filter >= 0 && opts->p25_nac_filter <= 0xFFF &&
+	    state->p2_cc != 0 && (int)state->p2_cc != opts->p25_nac_filter)
+	{
+		//Only allow MAC_SIGNAL if it carries NET_STS_BCST (0x7B or 0xFB) so state->p2_cc can update
+		if (!(opcode == 0x0 && (SMAC[1] == 0x7B || SMAC[1] == 0xFB)))
+		{
+			fprintf (stderr, " [NAC FILTER: %03X]", opts->p25_nac_filter);
+			state->p2_is_lcch = 0;
+			goto END_SMAC;
+		}
+	}
+
 	//remember, slots are inverted here, so set the opposite ones
 	//monitor, test, and remove these if they cause issues due to inversion
+	if (err == 0 && (opcode == 0x2 || opcode == 0x3 || opcode == 0x6))
+		ambe_hw_reset_slot(slot);
 	if (opcode == 0x0)
 	{
 		fprintf (stderr, " MAC_SIGNAL ");
@@ -306,6 +320,7 @@ void process_SACCH_MAC_PDU (dsd_opts * opts, dsd_state * state, int payload[180]
 			//print it and then zero out
 			state->lastsrc = 0;
 			state->lasttg = 0;
+			ambe_hw_reset_call(0);
 
 			//close any open MBEout files
  			if (opts->mbe_out_f != NULL) closeMbeOutFile (opts, state);
@@ -347,6 +362,7 @@ void process_SACCH_MAC_PDU (dsd_opts * opts, dsd_state * state, int payload[180]
 			//print it and then zero out
 			state->lastsrcR = 0;
 			state->lasttgR = 0;
+			ambe_hw_reset_call(1);
 
 			//close any open MBEout files
 			if (opts->mbe_out_fR != NULL) closeMbeOutFileR (opts, state);
@@ -407,6 +423,8 @@ void process_SACCH_MAC_PDU (dsd_opts * opts, dsd_state * state, int payload[180]
 					state->lastsrc = 0;
 					state->lasttgR = 0;
 					state->lastsrcR = 0;
+					ambe_hw_reset_call(0);
+					ambe_hw_reset_call(1);
 					state->payload_algid = 0;
 					state->payload_keyid = 0;
 					state->payload_algidR = 0;
@@ -430,6 +448,8 @@ void process_SACCH_MAC_PDU (dsd_opts * opts, dsd_state * state, int payload[180]
 					state->lastsrc = 0;
 					state->lasttgR = 0;
 					state->lastsrcR = 0;
+					ambe_hw_reset_call(0);
+					ambe_hw_reset_call(1);
 					state->payload_algid = 0;
 					state->payload_keyid = 0;
 					state->payload_algidR = 0;
@@ -583,6 +603,14 @@ void process_FACCH_MAC_PDU (dsd_opts * opts, dsd_state * state, int payload[156]
 	}
 
 
+	if (opts->p25_nac_filter >= 0 && opts->p25_nac_filter <= 0xFFF &&
+	    state->p2_cc != 0 && (int)state->p2_cc != opts->p25_nac_filter)
+	{
+		fprintf (stderr, " [NAC FILTER: %03X]", opts->p25_nac_filter);
+		state->p2_is_lcch = 0;
+		goto END_FMAC;
+	}
+
 	//Not sure if a MAC Signal will come on a FACCH or not, so disable to prevent falsing
 	// if (opcode == 0x0)
 	// {
@@ -591,6 +619,9 @@ void process_FACCH_MAC_PDU (dsd_opts * opts, dsd_state * state, int payload[156]
 	// 	process_MAC_VPDU(opts, state, 0, FMAC);
 	// 	fprintf (stderr, "%s", KNRM);
 	// }
+
+	if (err == 0 && (opcode == 0x1 || opcode == 0x2 || opcode == 0x3 || opcode == 0x6))
+		ambe_hw_reset_slot(slot);
 
 	if (opcode == 0x1 && err == 0)
 	{
@@ -773,6 +804,7 @@ void process_FACCH_MAC_PDU (dsd_opts * opts, dsd_state * state, int payload[156]
 			//print it and then zero out
 			state->lastsrc = 0;
 			state->lasttg = 0;
+			ambe_hw_reset_call(0);
 
 			//close any open MBEout files
  			if (opts->mbe_out_f != NULL) closeMbeOutFile (opts, state);
@@ -814,6 +846,7 @@ void process_FACCH_MAC_PDU (dsd_opts * opts, dsd_state * state, int payload[156]
 			//print it and then zero out
 			state->lastsrcR = 0;
 			state->lasttgR = 0;
+			ambe_hw_reset_call(1);
 
 			//close any open MBEout files
 			if (opts->mbe_out_fR != NULL) closeMbeOutFileR (opts, state);
@@ -863,6 +896,8 @@ void process_FACCH_MAC_PDU (dsd_opts * opts, dsd_state * state, int payload[156]
 					state->lastsrc = 0;
 					state->lasttgR = 0;
 					state->lastsrcR = 0;
+					ambe_hw_reset_call(0);
+					ambe_hw_reset_call(1);
 					state->payload_algid = 0;
 					state->payload_keyid = 0;
 					state->payload_algidR = 0;
@@ -886,6 +921,8 @@ void process_FACCH_MAC_PDU (dsd_opts * opts, dsd_state * state, int payload[156]
 					state->lastsrc = 0;
 					state->lasttgR = 0;
 					state->lastsrcR = 0;
+					ambe_hw_reset_call(0);
+					ambe_hw_reset_call(1);
 					state->payload_algid = 0;
 					state->payload_keyid = 0;
 					state->payload_algidR = 0;
@@ -919,6 +956,7 @@ void process_FACCH_MAC_PDU (dsd_opts * opts, dsd_state * state, int payload[156]
 			state->voice_counter[0] = 0;
 			state->lastsrc = 0;
 			state->lasttg = 0;
+			ambe_hw_reset_call(0);
 
 		}
 		else
@@ -930,6 +968,7 @@ void process_FACCH_MAC_PDU (dsd_opts * opts, dsd_state * state, int payload[156]
 			state->voice_counter[1] = 0;
 			state->lastsrcR = 0;
 			state->lasttgR = 0;
+			ambe_hw_reset_call(1);
 
 		}
 		fprintf (stderr, " MAC_IDLE ");

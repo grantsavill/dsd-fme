@@ -1,7 +1,7 @@
 #ifndef SYNCTYPE_H
 #define SYNCTYPE_H
 
-static const char * SyncTypes[44] = {
+static const char * SyncTypes[45] = {
   "P25p1",
   "P25p1",
   "X2TDMA DATA",
@@ -42,7 +42,11 @@ static const char * SyncTypes[44] = {
   "EDACS/PV", //37
   "EDACS/PV", //38
   "ANALOG", //39 Generic Sync Types
-  "DIGITAL" //40 Generic Sync Types
+  "DIGITAL", //40 Generic Sync Types
+  "TETRA", //41 +TETRA
+  "TETRA", //42 -TETRA
+  "TETRA", //43 TETRA
+  "APRS"   //44 APRS
 };
 
 #endif

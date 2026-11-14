@@ -15,18 +15,19 @@ void dmr_pi (dsd_opts * opts, dsd_state * state, uint8_t PI_BYTE[], uint32_t CRC
 
   uint8_t MFID = PI_BYTE[1];
 
-  if(IrrecoverableErrors == 0)
+  if(IrrecoverableErrors == 0 && CRCCorrect == 1)
   {
+    int pi_valid = 0;
 
     //update cc amd vc sync time for trunking purposes (particularly Con+)
-    if (opts->p25_is_tuned == 1)
-    {
+    if ((opts->p25_trunk == 0 || opts->trunk_tune_enc_calls == 1) &&
+        !trunk_is_dmr_slot_blocked(opts, state, state->currentslot))
       state->last_vc_sync_time = time(NULL);
-      state->last_cc_sync_time = time(NULL);
-    }
+    state->last_cc_sync_time = time(NULL);
 
-    if (MFID == 0x0A && CRCCorrect == 1) //Kirisun
+    if (MFID == 0x0A) //Kirisun
     {
+      pi_valid = 1;
       //NOTE: Some Kirisun Radios seem to use byte 2 as the SVC_OPT, others seem to use it like a KID value
       // uint8_t so  = PI_BYTE[2]; //in VLC and PI, this byte is 0x40, so thinking this could be SVC_OPT
       uint8_t alg = PI_BYTE[0]; //observed 0x36 and 0x37 for Kirisun Advanced and Universal Privacy
@@ -47,14 +48,14 @@ void dmr_pi (dsd_opts * opts, dsd_state * state, uint8_t PI_BYTE[], uint32_t CRC
 
       if (state->currentslot == 0)
       {
-        state->dmr_so = 0x40;
+        state->dmr_so |= 0x8040;
         state->payload_algid = alg;
         state->payload_keyid = kid;
         state->payload_mi = mi;
       }
       else
       {
-        state->dmr_soR = 0x40;
+        state->dmr_soR |= 0x8040;
         state->payload_algidR = alg;
         state->payload_keyidR = kid;
         state->payload_miR = mi;
@@ -95,23 +96,6 @@ void dmr_pi (dsd_opts * opts, dsd_state * state, uint8_t PI_BYTE[], uint32_t CRC
 
     if (MFID == 0x68) //Hytera Enhanced
     {
-      if (state->currentslot == 0)
-      {
-        state->dmr_so |= 0x40; //OR the enc bit onto the SO
-        state->payload_algid = PI_BYTE[0];
-        state->payload_keyid = PI_BYTE[2];
-        state->payload_mi = ((unsigned long long int)PI_BYTE[3] << 32ULL) | ((unsigned long long int)PI_BYTE[4] << 24) | 
-        ((unsigned long long int)PI_BYTE[5] << 16) | ((unsigned long long int)PI_BYTE[6] << 8) | ((unsigned long long int)PI_BYTE[7] << 0);
-      }
-      else
-      {
-        state->dmr_soR |= 0x40; //OR the enc bit onto the SO
-        state->payload_algidR = PI_BYTE[0];
-        state->payload_keyidR = PI_BYTE[2];
-        state->payload_miR = ((unsigned long long int)PI_BYTE[3] << 32ULL) | ((unsigned long long int)PI_BYTE[4] << 24) | 
-        ((unsigned long long int)PI_BYTE[5] << 16) | ((unsigned long long int)PI_BYTE[6] << 8) | ((unsigned long long int)PI_BYTE[7] << 0);
-      }
-
       fprintf (stderr, "%s ", KYEL);
       fprintf (stderr, "\n Slot %d", state->currentslot+1);
       fprintf (stderr, " DMR PI H- ALG ID: %02X; KEY ID: %02X; MI(40): %02X%02X%02X%02X%02X;", 
@@ -132,6 +116,27 @@ void dmr_pi (dsd_opts * opts, dsd_state * state, uint8_t PI_BYTE[], uint32_t CRC
 
       if (checksum == PI_BYTE[9])
       {
+        if (state->currentslot == 0)
+        {
+          state->dmr_so |= 0x8040; //OR the enc bit onto the SO
+          state->payload_algid = PI_BYTE[0];
+          state->payload_keyid = PI_BYTE[2];
+          state->payload_mi = ((unsigned long long int)PI_BYTE[3] << 32ULL) | ((unsigned long long int)PI_BYTE[4] << 24) | 
+          ((unsigned long long int)PI_BYTE[5] << 16) | ((unsigned long long int)PI_BYTE[6] << 8) | ((unsigned long long int)PI_BYTE[7] << 0);
+        }
+        else
+        {
+          state->dmr_soR |= 0x8040; //OR the enc bit onto the SO
+          state->payload_algidR = PI_BYTE[0];
+          state->payload_keyidR = PI_BYTE[2];
+          state->payload_miR = ((unsigned long long int)PI_BYTE[3] << 32ULL) | ((unsigned long long int)PI_BYTE[4] << 24) | 
+          ((unsigned long long int)PI_BYTE[5] << 16) | ((unsigned long long int)PI_BYTE[6] << 8) | ((unsigned long long int)PI_BYTE[7] << 0);
+        }
+
+        pi_valid = 1;
+        if (state->keyloader == 1)
+          keyring (opts, state);
+
         fprintf (stderr, " Hytera Enhanced; ");
 
         if (state->currentslot == 0 && state->R != 0)
@@ -157,14 +162,24 @@ void dmr_pi (dsd_opts * opts, dsd_state * state, uint8_t PI_BYTE[], uint32_t CRC
 
     else if (MFID == 0x10) //DMRA
     {
+      uint8_t alg = PI_BYTE[0];
+      uint8_t alg_low = alg & 0x07;
+      unsigned long long int mi = ((unsigned long long int)PI_BYTE[3] << 24ULL) | ((unsigned long long int)PI_BYTE[4] << 16ULL) | ((unsigned long long int)PI_BYTE[5] << 8ULL) | ((unsigned long long int)PI_BYTE[6] << 0ULL);
+      int valid_dmra = ((alg & 0xD8) == 0) &&
+                       (alg_low == 0x01 || alg_low == 0x02 || alg_low == 0x04 || alg_low == 0x05 || alg_low == 0x06) &&
+                       (alg_low == 0x06 || mi != 0);
 
-      if (state->currentslot == 0)
+      if (valid_dmra)
+        pi_valid = 1;
+
+      if (state->currentslot == 0 && valid_dmra)
       {
         state->payload_algid = PI_BYTE[0];
         state->payload_keyid = PI_BYTE[2];
         state->payload_mi    = ((unsigned long long int)PI_BYTE[3] << 24ULL) | ((unsigned long long int)PI_BYTE[4] << 16ULL) | ((unsigned long long int)PI_BYTE[5] << 8ULL) | ((unsigned long long int)PI_BYTE[6] << 0ULL);
         if (state->payload_algid < 0x28)
         {
+          state->dmr_so |= 0x8040;
           fprintf (stderr, "%s ", KYEL);
           fprintf (stderr, "\n Slot 1");
           fprintf (stderr, " DMR PI H- ALG ID: %02X; KEY ID: %02X; MI(32): %08llX;", state->payload_algid, state->payload_keyid, state->payload_mi);
@@ -222,23 +237,17 @@ void dmr_pi (dsd_opts * opts, dsd_state * state, uint8_t PI_BYTE[], uint32_t CRC
             LFSR128d (state);
           }
         }
-
-        if (state->payload_algid >= 0x28)
-        {
-          state->payload_algid = 0;
-          state->payload_keyid = 0;
-          state->payload_mi = 0;
-        }
       }
 
-      if (state->currentslot == 1)
+      if (state->currentslot == 1 && valid_dmra)
       {
 
         state->payload_algidR = PI_BYTE[0];
         state->payload_keyidR = PI_BYTE[2];
         state->payload_miR    = ((unsigned long long int)PI_BYTE[3] << 24ULL) | ((unsigned long long int)PI_BYTE[4] << 16ULL) | ((unsigned long long int)PI_BYTE[5] << 8ULL) | ((unsigned long long int)PI_BYTE[6] << 0ULL);
-        if (state->payload_algidR < 0x26)
+        if (state->payload_algidR < 0x28)
         {
+          state->dmr_soR |= 0x8040;
           fprintf (stderr, "%s ", KYEL);
           fprintf (stderr, "\n Slot 2");
           fprintf (stderr, " DMR PI H- ALG ID: %02X; KEY ID: %02X; MI(32): %08llX;", state->payload_algidR, state->payload_keyidR, state->payload_miR);
@@ -297,16 +306,17 @@ void dmr_pi (dsd_opts * opts, dsd_state * state, uint8_t PI_BYTE[], uint32_t CRC
           }
         }
 
-        if (state->payload_algidR >= 0x28)
-        {
-          state->payload_algidR = 0;
-          state->payload_keyidR = 0;
-          state->payload_miR = 0;
-        }
-
       }
 
     } //end DMRA
+
+    if (pi_valid)
+    {
+      dmr_alg_reset (opts, state);
+      if (state->keyloader == 1)
+        keyring (opts, state);
+      ambe_hw_reset_slot(state->currentslot);
+    }
 
   }
 }

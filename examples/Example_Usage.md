@@ -4,21 +4,23 @@
 
 ```
 -ft XDMA decoder class (P25p1 and p2, YSF, and DMR Stereo)
--fs DMR Stereo, also may need to use -xr if inverted DMR
+-fs DMR Stereo (optional Color Code filter: -fs0 to -fs15), also may need to use -xr if inverted DMR
 -fa Legacy Auto (not recommended)
--fi NXDN48
--fn NXDN96
+-fi NXDN48 (optional RAN filter: -fi0 to -fi63)
+-fn NXDN96 (optional RAN filter: -fn0 to -fn63)
 -fp Provoice
 -fh EDACS Standard / Network
 -fH EDACS Standard / Network with ESK
 -fe EDACS Extended Addresssing
 -fE EDACS Extended Addressing with ESK
 -fm dPMR, also may need to use -xd if inverted dPMR.
--f1 P25P1
--f2 P25P2 (may need to specify wacn/sys/nac manually if traffic channel)
+-f1 P25P1 (optional NAC filter: -f1000 to -f1FFF)
+-f2 P25P2 (optional NAC filter: -f2000 to -f2FFF; may need to specify wacn/sys/nac manually if traffic channel)
 -fx X2-TDMA
 -fy YSF
 -fz M17 Stream
+-fT TETRA (optional Colour Code filter: -fT0 to -fT63)
+-fP APRS / AX.25 Packet Radio (1200-baud Bell 202 AFSK / 9600-baud G3RUH FSK)
 ```
 
 ## Conventional Frequency Scanner
@@ -159,9 +161,49 @@ NXDN Trunking Update: NXDN DFA (Direct Frequency Assignment) has been coded from
 
 NXDN Type-D/IDAS Update: Type-D or IDAS decoding/trunking has been coded now and tested on a small two channel system. Set up a channel map much like Type-C trunking. If preferred, insert channel 31 at the top of your channel map for the 'home repeater' or go to channel of choice during a TX_REL or DISC message. Extensive testing of Type-D has not been conducted. Some cavaets may currently include iffy per call wav file saving and potentially shifting SRC and TGT ID values due to how SCCH messages are handled and how Busy Repeater Messages are handled. Private calls will need to be enabled by enabling 'data calls', if desired. During testing, only data calls came on private calls, so this was set to disabled by default, but can be enabled with data calls enabled. Also, note that some home repeater channels may or may not carry calls from all systems.
 
-Channel Map and Group CSV Note: Leave the top line of the channel_map.csv and group.csv as the label, do not delete the line, if no line is there, dsd_import skips the first line so it will not import the first channel or first group in those files if there is something there that isn't a label. 
+Channel Map and Group CSV Note: Leave the top line of the channel_map.csv and group.csv as the label, do not delete the line, if no line is there, dsd_import skips the first line so it will not import the first channel or first group in those files if there is something there that isn't a label. Channel map CSV files (`-C`) also support an optional 3rd column (`channel,frequency,access_code`) to specify a per-channel DMR Color Code (`0-15` decimal), NXDN RAN (`0-63` decimal), or P25 NAC (`000-FFF` hex) that is automatically applied whenever DSD-FME tunes to that channel during trunking or `-Y` scanning.
 
 Hytera XPT: Code has been added for XPT system slco/flco/csbk decoding and trunking. The setup will be similar to Capacity Plus trunking in the csv file, listing each LSN channel to a frequency (see examples/hytera_xpt_chan.csv). Currently, this set up is working with smaller XPT systems that I have been able to test with.
+
+## TETRA ##
+
+TETRA control and traffic channel signalling and `TCH/S` ACELP voice can be decoded with the `-fT` switch (`pi/4-DQPSK`, 18000 sym/s, 25 kHz bandwidth), with an optional Colour Code filter (`-fT0` to `-fT63`). It decodes `SYNC`/`SYSINFO` (`MCC`, `MNC`, `LA`, `CC`), encryption state (`Clear` or `Encrypted (TEA1/TEA2/TEA3/TEA4)`), `Carrier` and `Main Carrier` frequencies, `D-NWRK-BROADCAST` `Cell Neighbours`, per-timeslot `TN 1`–`TN 4` status, and MAC/LLC/MLE/CMCE/MM/SDS PDUs.
+
+For `TCH/S` ACELP voice synthesis, place the ETSI TETRA codec binaries (`cdecoder` and `sdecoder`, or `cdecoder.exe` and `sdecoder.exe` on Windows/Cygwin) in the same directory as `dsd-fme` or on your `PATH`.
+
+For encrypted TETRA channels (`TEA1`–`TEA4`), DSD-FME automatically tests common `TEA1`/`TEA2`/`TEA3` keys and `BYPASS`, and also accepts a user-supplied `TEA1` (20 hex chars / 80-bit) or `TEA2`/`TEA3`/`TEA4` (32 hex chars / 128-bit) key via `-H`:
+
+--TETRA with RTL-SDR input (use 24 kHz bandwidth):
+
+`dsd-fme -fT -i rtl:0:390.6375M:26:-2:24 -N 2> log.ans`
+
+--TETRA with SDR++ TCP Direct Audio Link (set VFO bandwidth to ~25 kHz):
+
+`dsd-fme -fT -i tcp -N 2> log.ans`
+
+--TETRA locked to Colour Code 1 with a custom TEA1 (80-bit) or TEA2/TEA3/TEA4 (128-bit) hex key:
+
+`dsd-fme -fT1 -H '1122334455667788 9900' -i tcp -N 2> log.ans`
+
+`dsd-fme -fT1 -H '0102030405060708 090A0B0C0D0E0F10' -i tcp -N 2> log.ans`
+
+## APRS / AX.25 Packet Radio ##
+
+APRS and AX.25 UI packet radio frames can be decoded with the `-fP` (or `-faprs`) switch. Both **1200-baud Bell 202 AFSK** (`1200 Hz` mark / `2200 Hz` space) and **9600-baud G3RUH baseband FSK** (`17-bit LFSR` descrambler + NRZI + HDLC + CRC-16/X.25 FCS) run simultaneously in parallel on the 48 kHz input stream.
+
+Decoded packets include uncompressed and Base-91 compressed positions, Mic-E (`'`, `` ` ``, `0x1C`, `0x1D`) with radio model identification and emergency/status decoding, Objects (`;`), Items (`)`), Weather reports (`_`, `@`, `/`, `!`), Messages (`:`), Telemetry (`T#`), Status (`>`), Raw NMEA (`$GPRMC`/`$GPGGA`), Maidenhead grid locators (`[` and status), and Third-Party (`}`) bridged frames. When `-L <filename>` is specified, decoded APRS positions (with deterministic numeric hashes for source callsigns, objects, and items) are appended to the LRRP data file (`YYYY/MM/DD HH:MM:SS <RadioID> <Lat> <Lon> <SpeedKmh> <CourseDeg>`).
+
+--APRS with RTL-SDR input (144.390 MHz North America / 144.800 MHz Europe / 145.825 MHz ISS):
+
+`dsd-fme -fP -i rtl:0:144.390M:26:0:12 -L lrrp.txt -N 2> log.ans`
+
+--APRS with SDR++ TCP Direct Audio Link, LRRP output, Event Log, and raw AX.25 frame hex dump (`-Z`):
+
+`dsd-fme -fP -i tcp -L lrrp.txt -J aprs_events.txt -Z -N 2> log.ans`
+
+--APRS from a 48 kHz mono WAV file:
+
+`dsd-fme -fP -i examples/aprs_sample.wav -L lrrp.txt -Z`
 
 ## NCurses Keyboard Shortcuts ##
 
@@ -176,7 +218,7 @@ z - toggle console payloads
 a - toggle call alert beep
 4 - force privacy/scrambler key assertion over enc identifiers (dmr and nxdn)
 6 - force rc4 key assertion over missing pi header/le enc identifiers (dmr)
-i - toggle signal inversion on types that can't auto detect (dmr, dpmr)
+i - toggle signal inversion on types that can't auto detect (dmr, dpmr, tetra)
 m - toggle c4fm/qpsk 10/4 (everything but phase 2 signal)
 M - toggle c4fm/qpsk 8/3 (phase 2 tdma control channel)
 R - start capturing symbol capture bin (date/time name file)
@@ -193,10 +235,10 @@ w - Toggle Trunking/Playback White List (Allow A Groups Only) / Black List (Bloc
 T - Toggle Trunking Tuning to Group Calls (DMR T3, Con+, Cap+, P25, NXDN)
 u - Toggle Trunking Tuning to Private Calls (DMR T3, Cap+, P25)
 d - Toggle Trunking Tuning to Data Calls (DMR T3, NXDN)
-e - Toggle Trunking Tuning to Encrypted Calls (P25)
+e - Toggle Trunking Tuning to Encrypted Calls (P25) / Toggle Encrypted Voice Mute (TETRA)
 8 - Connect to SDR++ TCP Audio Sink with Defaults/Retry Sink Connection on Disconnect
 9 - Connect to SDR++ RIGCTL Server with Defaults/Retry RIGCTL Connection
-D - Reset DMR Site Parms/Call Strings, etc.
+D - Reset DMR/TETRA Site Parms/Call Strings, etc.
 Z - Simulate NoCarrier/No VC/CC sync (capital Z)
 
 ! - Lockout Tuning/Playback of TG in Slot 1 or Conventional -- Current Session Only if no group.csv file specified
@@ -227,6 +269,10 @@ G - Manually increase RTL gain
 
 { - Manually decrease PPM
 } - Manually increase PPM
+0 - Lock/Unlock DMR Color Code, NXDN RAN, P25 NAC, or TETRA Colour Code filter on current active signal
+. - Increment DMR Color Code (0-15), NXDN RAN (0-63), P25 NAC (000-FFF), or TETRA Colour Code (0-63) filter
+, - Decrement DMR Color Code (0-15), NXDN RAN (0-63), P25 NAC (000-FFF), or TETRA Colour Code (0-63) filter
+x - Toggle AMBE3000/AMBE3003 hardware vocoder / MBElib software fallback
 
 ```
 

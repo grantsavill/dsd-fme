@@ -307,6 +307,7 @@ void p25_lcw (dsd_opts * opts, dsd_state * state, uint8_t LCW_bits[], uint8_t ir
         uint32_t tgt = (uint32_t)ConvertBitIntoBytes(&LCW_bits[48], 24); //can be individual, or all units (0xFFFFFF)
         fprintf (stderr, " Call Termination; TGT: %d;", tgt);
         memset (state->dmr_pdu_sf[0], 0, sizeof (state->dmr_pdu_sf[0])); //reset storage for any talker alias (or other items)
+        p25_talker_alias_reset(state, 0);
         if (opts->p25_trunk == 1 && state->p25_cc_freq != 0 && opts->p25_is_tuned == 1)
         {
 
@@ -347,6 +348,7 @@ void p25_lcw (dsd_opts * opts, dsd_state * state, uint8_t LCW_bits[], uint8_t ir
           {
             state->lasttg = 0;
             state->lastsrc = 0;
+            ambe_hw_reset_call(0);
             state->gi[0] = -1;
             state->payload_algid = 0;
             state->payload_keyid = 0;
@@ -367,6 +369,7 @@ void p25_lcw (dsd_opts * opts, dsd_state * state, uint8_t LCW_bits[], uint8_t ir
             #ifdef USE_RTLSDR
             state->lasttg = 0;
             state->lastsrc = 0;
+            ambe_hw_reset_call(0);
             state->gi[0] = -1;
             state->payload_algid = 0;
             state->payload_keyid = 0;
@@ -479,6 +482,7 @@ void p25_lcw (dsd_opts * opts, dsd_state * state, uint8_t LCW_bits[], uint8_t ir
     {
       uint32_t src = (uint32_t)ConvertBitIntoBytes(&LCW_bits[48], 24);
       fprintf (stderr, " MFID90 (Moto) Talker EOT; SRC: %d;", src);
+      p25_talker_alias_reset(state, 0);
     }
 
     //look for these in logs

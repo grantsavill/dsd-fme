@@ -108,18 +108,95 @@ void apx_embedded_alias_test_phase1 (dsd_opts * opts, dsd_state * state)
 
 }
 
+void p25_talker_alias_reset (dsd_state * state, uint8_t slot)
+{
+  if (slot > 1) return;
+  state->p25_apx_hdr_ok[slot] = 0;
+  state->p25_apx_ta_len[slot] = 0;
+  state->p25_apx_sn[slot] = 0;
+  state->p25_apx_blk_ok[slot] = 0;
+  memset (state->p25_apx_bits[slot], 0, sizeof(state->p25_apx_bits[slot]));
+  state->p25_l3h_blk_ok[slot] = 0;
+  memset (state->p25_l3h_bytes[slot], 0, sizeof(state->p25_l3h_bytes[slot]));
+}
+
+void nxdn_talker_alias_reset (dsd_state * state)
+{
+  state->nxdn_alias_blk_ok = 0;
+  state->nxdn_alias_total = 0;
+  state->nxdn_alias_src = 0;
+  memset (state->nxdn_alias_buf, 0, sizeof(state->nxdn_alias_buf));
+  memset (state->generic_talker_alias[0], 0, sizeof(state->generic_talker_alias[0]));
+  sprintf (state->generic_talker_alias[0], "%s", "");
+}
+
+void nxdn_talker_alias_sync_source (dsd_state * state, uint32_t source)
+{
+  if (source == 0) return;
+  if (state->nxdn_alias_src == source) return;
+
+  nxdn_talker_alias_reset (state);
+  state->nxdn_alias_src = source;
+}
+
+static void apx_try_decode (dsd_opts * opts, dsd_state * state, uint8_t slot)
+{
+  uint8_t ta_len = state->p25_apx_ta_len[slot];
+  if (state->p25_apx_hdr_ok[slot] == 0 || ta_len == 0 || ta_len > 29) return;
+
+  uint32_t want = (1U << ta_len) - 1U;
+  if ((state->p25_apx_blk_ok[slot] & want) != want) return;
+
+  //Calculate variable len bits determined by non-zero octets
+  int16_t num_bits = 56; //starting value is the static bit count on the fqsuid
+
+  //evaluate the storage and determine how many octets/bits are present at this point (expanded to two octets each, CRC with a 00xx pattern failed this)
+  for (int16_t i = 0; i < 184; i++) //(3072-128)/16
+  {
+    uint16_t bytes = (uint16_t)ConvertBitIntoBytes(&state->p25_apx_bits[slot][72+56+(i*16)], 16);
+    if (bytes == 0)
+      break;
+    else
+      num_bits += 16;
+  }
+
+  //pass to alias decoder
+  apx_embedded_alias_decode (opts, state, slot, num_bits, state->p25_apx_bits[slot]);
+
+  //clear out now stale storage
+  state->p25_apx_hdr_ok[slot] = 0;
+  state->p25_apx_ta_len[slot] = 0;
+  state->p25_apx_sn[slot] = 0;
+  state->p25_apx_blk_ok[slot] = 0;
+  memset (state->p25_apx_bits[slot], 0, sizeof(state->p25_apx_bits[slot]));
+}
+
 void apx_embedded_alias_header_phase1 (dsd_opts * opts, dsd_state * state, uint8_t slot, uint8_t * lc_bits)
 {
 
   UNUSED(opts);
+  if (slot > 1) return;
   uint8_t ta_len = (uint8_t)ConvertBitIntoBytes(&lc_bits[32], 8); //len in blocks of associated talker alias
   uint8_t sn = (uint8_t)ConvertBitIntoBytes(&lc_bits[56], 4);
   fprintf (stderr, " SN: %X;", sn);
   fprintf (stderr, " BN: 0/%d;", ta_len);
 
-  //use dmr_pdu_sf for storage, store entire header (will be used to verify complete reception of full alias)
-  memset (state->dmr_pdu_sf[slot], 0, sizeof (state->dmr_pdu_sf[slot])); //reset storage for header and blocks
-  memcpy (state->dmr_pdu_sf[slot], lc_bits, 72*sizeof(uint8_t));
+  if (ta_len == 0 || ta_len > 29) return;
+
+  //reset if sequence changed or header len changed from an earlier sequence
+  if ((state->p25_apx_blk_ok[slot] != 0 || state->p25_apx_hdr_ok[slot] != 0) &&
+      (state->p25_apx_sn[slot] != sn || (state->p25_apx_hdr_ok[slot] && state->p25_apx_ta_len[slot] != ta_len)))
+  {
+    state->p25_apx_blk_ok[slot] = 0;
+    memset (state->p25_apx_bits[slot], 0, sizeof(state->p25_apx_bits[slot]));
+  }
+
+  state->p25_apx_hdr_ok[slot] = 1;
+  state->p25_apx_ta_len[slot] = ta_len;
+  state->p25_apx_sn[slot] = sn;
+  memcpy (state->p25_apx_bits[slot], lc_bits, 72*sizeof(uint8_t));
+
+  apx_try_decode (opts, state, slot);
 
 }
 
@@ -127,81 +204,57 @@ void apx_embedded_alias_blocks_phase1 (dsd_opts * opts, dsd_state * state, uint8
 {
 
   UNUSED(opts);
+  if (slot > 1) return;
   uint8_t bn = (uint8_t)ConvertBitIntoBytes(&lc_bits[16], 8); //current block number
   uint8_t sn = (uint8_t)ConvertBitIntoBytes(&lc_bits[24], 4); //is a static value on all block sequences
-  uint8_t ta_len = (uint8_t)ConvertBitIntoBytes(&state->dmr_pdu_sf[slot][32], 8); //len in blocks pulled from stored header
-  uint16_t header = (uint16_t)ConvertBitIntoBytes(&state->dmr_pdu_sf[slot][0], 16); //header check, should be 0x1590
+  uint8_t ta_len = state->p25_apx_ta_len[slot];
+  uint16_t header = (uint16_t)ConvertBitIntoBytes(&state->p25_apx_bits[slot][0], 16); //header check, should be 0x1590
 
-  if (ta_len == 0 || header != 0x1590) //checkdown, make sure we have an up to date header for this with a good len value
+  //sanity check, bn cannot equal zero (this shouldn't happen, but bad decode could occur)
+  if (bn == 0) bn = 1;
+  if (bn > 29) return;
+
+  //if sequence number changed, discard blocks from the previous sequence
+  if ((state->p25_apx_blk_ok[slot] != 0 || state->p25_apx_hdr_ok[slot] != 0) && state->p25_apx_sn[slot] != sn)
+  {
+    state->p25_apx_hdr_ok[slot] = 0;
+    state->p25_apx_ta_len[slot] = 0;
+    state->p25_apx_blk_ok[slot] = 0;
+    memset (state->p25_apx_bits[slot], 0, sizeof(state->p25_apx_bits[slot]));
+    ta_len = 0;
+    header = 0;
+  }
+
+  state->p25_apx_sn[slot] = sn;
+  memcpy (state->p25_apx_bits[slot]+(((bn-1)*44)+72), lc_bits+28, 44*sizeof(uint8_t));
+  state->p25_apx_blk_ok[slot] |= (1U << (bn-1));
+
+  if (state->p25_apx_hdr_ok[slot] == 0 || ta_len == 0 || header != 0x1590) //waiting for header
   {
     fprintf (stderr, " Missing Header");
     fprintf (stderr, " BN: %d/??;", bn);
     fprintf (stderr, " SN: %X;", sn);
-    fprintf (stderr, " Partial: ");
-    for (uint8_t i = 7; i < 18; i++)
-      fprintf (stderr, "%0X", (uint8_t)ConvertBitIntoBytes(&lc_bits[0+(i*4)], 4));
-
-    //clear out now stale storage
-    memset (state->dmr_pdu_sf[slot], 0, sizeof (state->dmr_pdu_sf[slot]));
+    return;
   }
 
-  else //good len and header stored
-  {
+  fprintf (stderr, " SN: %X;", sn);
+  fprintf (stderr, " BN: %d/%d;", bn, ta_len);
 
-    //sanity check, bn cannot equal zero (this shouldn't happen, but bad decode could occur)
-    if (bn == 0) bn = 1;
-
-    fprintf (stderr, " SN: %X;", sn);
-    fprintf (stderr, " BN: %d/%d;", bn, ta_len);
-
-    //use dmr_pdu_sf for storage, store data relevant portion at ptr of (bn-1) * 44 + 72 offset for header
-    memcpy(state->dmr_pdu_sf[slot]+(((bn-1)*44)+72), lc_bits+28, 44*sizeof(uint8_t));
-
-    if (ta_len == bn) //this is the last block, proceed to decoding
-    {
-
-      //Calculate variable len bits determined by non-zero octets
-      int16_t num_bits = 56; //starting value is the static bit count on the fqsuid
-
-      // //evaluate the storage and determine how many octets/bits are present at this point (fall back to this if needed)
-      // for (int16_t i = 0; i < 368; i++) //(3072-128)/8
-      // {
-      //   uint8_t byte = (uint8_t)ConvertBitIntoBytes(&state->dmr_pdu_sf[slot][72+56+(i*8)], 8);
-      //   if (byte == 0)
-      //     break;
-      //   else
-      //     num_bits += 8;
-      // }
-
-      //evaluate the storage and determine how many octets/bits are present at this point (expanded to two octets each, CRC with a 00xx pattern failed this)
-      for (int16_t i = 0; i < 184; i++) //(3072-128)/16
-      {
-        uint16_t bytes = (uint16_t)ConvertBitIntoBytes(&state->dmr_pdu_sf[slot][72+56+(i*16)], 16);
-        if (bytes == 0)
-          break;
-        else
-          num_bits += 16;
-      }
-
-      //pass to alias decoder
-      apx_embedded_alias_decode (opts, state, slot, num_bits, state->dmr_pdu_sf[slot]);
-
-      //clear out now stale storage
-      memset (state->dmr_pdu_sf[slot], 0, sizeof(state->dmr_pdu_sf[slot]));
-
-    }
-  }
+  apx_try_decode (opts, state, slot);
 }
 
 void apx_embedded_alias_header_phase2 (dsd_opts * opts, dsd_state * state, uint8_t slot, uint8_t * lc_bits)
 {
 
   UNUSED(opts);
+  if (slot > 1) return;
   uint8_t ta_len = (uint8_t)ConvertBitIntoBytes(&lc_bits[40], 8);
   uint8_t sn = (uint8_t)ConvertBitIntoBytes(&lc_bits[64], 4);
   uint8_t bn = (uint8_t)ConvertBitIntoBytes(&lc_bits[56], 8);
   fprintf (stderr, " SN: %X;", sn); //NOTE: vPDU header is also a partial block, and has a block num and SN value in it
   fprintf (stderr, " BN: %d/%d;", bn, ta_len);
+
+  if (ta_len == 0 || ta_len > 29) return;
 
   //bit array to rearrange input lc_bits from phase 2 input to match the phase 1 header and block handling
   uint8_t bits[136]; memset(bits, 0, sizeof(bits));
@@ -211,14 +264,19 @@ void apx_embedded_alias_header_phase2 (dsd_opts * opts, dsd_state * state, uint8
 
   int16_t alias_st = 136; //start of the encoded alias (the copied size of this header, basically)
 
-  //debug, dump header arranged at this end
-  // fprintf (stderr, " Header: ");
-  // for (int16_t i = 0; i < alias_st/8; i++) //double check and adjust
-  //   fprintf (stderr, "%02X", (uint8_t)ConvertBitIntoBytes(&bits[0+(i*8)], 8));
+  if ((state->p25_apx_blk_ok[slot] != 0 || state->p25_apx_hdr_ok[slot] != 0) &&
+      (state->p25_apx_sn[slot] != sn || (state->p25_apx_hdr_ok[slot] && state->p25_apx_ta_len[slot] != ta_len)))
+  {
+    state->p25_apx_blk_ok[slot] = 0;
+    memset (state->p25_apx_bits[slot], 0, sizeof(state->p25_apx_bits[slot]));
+  }
 
-  //use dmr_pdu_sf for storage, store entire header (will be used to verify complete reception of full alias)
-  memset (state->dmr_pdu_sf[slot], 0, sizeof (state->dmr_pdu_sf[slot])); //reset storage for header and blocks
-  memcpy (state->dmr_pdu_sf[slot], bits, alias_st*sizeof(uint8_t)); //this header block has 128 bits of relevant data (through the fqsuid)
+  state->p25_apx_hdr_ok[slot] = 1;
+  state->p25_apx_ta_len[slot] = ta_len;
+  state->p25_apx_sn[slot] = sn;
+  memcpy (state->p25_apx_bits[slot], bits, alias_st*sizeof(uint8_t)); //this header block has 128 bits of relevant data (through the fqsuid)
+
+  apx_try_decode (opts, state, slot);
 
 }
 
@@ -226,78 +284,45 @@ void apx_embedded_alias_blocks_phase2 (dsd_opts * opts, dsd_state * state, uint8
 {
 
   UNUSED(opts);
+  if (slot > 1) return;
   int16_t rel_bits = 100;  //number of relevant bits in each block
   int16_t rel_st   = 36;   //start of relevant bits in this block
   int16_t alias_st = 136;  //start of the encoded alias
   uint8_t bn = (uint8_t)ConvertBitIntoBytes(&lc_bits[24], 8); //current block number
   uint8_t sn = (uint8_t)ConvertBitIntoBytes(&lc_bits[32], 4); //is a static value on all block sequences
-  uint8_t ta_len = (uint8_t)ConvertBitIntoBytes(&state->dmr_pdu_sf[slot][32], 8); //len in blocks pulled from stored header
-  uint16_t header = (uint16_t)ConvertBitIntoBytes(&state->dmr_pdu_sf[slot][0], 16); //header check, should be 0x9190
+  uint8_t ta_len = state->p25_apx_ta_len[slot];
+  uint16_t header = (uint16_t)ConvertBitIntoBytes(&state->p25_apx_bits[slot][0], 16); //header check, should be 0x9190
 
-  if (ta_len == 0 || header != 0x9190)
+  //sanity check, bn cannot equal zero (this shouldn't happen, but bad decode could occur)
+  if (bn == 0) bn = 1;
+  if (bn > 29) return;
+
+  if ((state->p25_apx_blk_ok[slot] != 0 || state->p25_apx_hdr_ok[slot] != 0) && state->p25_apx_sn[slot] != sn)
+  {
+    state->p25_apx_hdr_ok[slot] = 0;
+    state->p25_apx_ta_len[slot] = 0;
+    state->p25_apx_blk_ok[slot] = 0;
+    memset (state->p25_apx_bits[slot], 0, sizeof(state->p25_apx_bits[slot]));
+    ta_len = 0;
+    header = 0;
+  }
+
+  state->p25_apx_sn[slot] = sn;
+  memcpy (state->p25_apx_bits[slot]+(alias_st+((bn-1)*rel_bits)), lc_bits+rel_st, rel_bits*sizeof(uint8_t));
+  state->p25_apx_blk_ok[slot] |= (1U << (bn-1));
+
+  if (state->p25_apx_hdr_ok[slot] == 0 || ta_len == 0 || header != 0x9190)
   {
     fprintf (stderr, " Missing Header");
     fprintf (stderr, " BN: %d/??;", bn);
     fprintf (stderr, " SN: %X;", sn);
-    fprintf (stderr, " Partial: ");
-    for (uint8_t i = 9; i < 32; i++) //double check and adjust
-      fprintf (stderr, "%0X", (uint8_t)ConvertBitIntoBytes(&lc_bits[0+(i*4)], 4));
-
-    //clear out now stale storage
-    memset (state->dmr_pdu_sf[slot], 0, sizeof(state->dmr_pdu_sf[slot]));
+    return;
   }
 
-  else //good len and header stored
-  {
+  fprintf (stderr, " SN: %X;", sn);
+  fprintf (stderr, " BN: %d/%d;", bn, ta_len);
 
-    //sanity check, bn cannot equal zero (this shouldn't happen, but bad decode could occur)
-    if (bn == 0) bn = 1;
-
-    fprintf (stderr, " SN: %X;", sn);
-    fprintf (stderr, " BN: %d/%d;", bn, ta_len);
-
-    //use dmr_pdu_sf for storage, store data relevant portion at ptr calculated below
-    memcpy(state->dmr_pdu_sf[slot]+(alias_st+((bn-1)*rel_bits)), lc_bits+rel_st, rel_bits*sizeof(uint8_t)); //Fix this value when samples arrive
-
-    //debug, dump accumulated data at this end
-    // fprintf (stderr, " Accumulated: ");
-    // for (int16_t i = 0; i < (alias_st+(rel_bits*bn))/8; i++) //double check and adjust
-    //   fprintf (stderr, "%02X", (uint8_t)ConvertBitIntoBytes(&state->dmr_pdu_sf[slot][0+(i*8)], 8));
-
-    if (ta_len == bn) //this is the last block, proceed to decoding
-    {
-
-      //Calculate variable len bits determined by non-zero octets
-      int16_t num_bits = 56; //starting value is the static bit count on the fqsuid
-
-      // //evaluate the storage and determine how many octets/bits are present at this point (fall back to this if needed)
-      // for (int16_t i = 0; i < 368; i++) //(3072-128)/8
-      // {
-      //   uint8_t byte = (uint8_t)ConvertBitIntoBytes(&state->dmr_pdu_sf[slot][72+56+(i*8)], 8);
-      //   if (byte == 0)
-      //     break;
-      //   else
-      //     num_bits += 8;
-      // }
-
-      //evaluate the storage and determine how many octets/bits are present at this point (expanded to two octets each, CRC with a 00xx pattern failed this)
-      for (int16_t i = 0; i < 184; i++) //(3072-128)/16
-      {
-        uint16_t bytes = (uint16_t)ConvertBitIntoBytes(&state->dmr_pdu_sf[slot][72+56+(i*16)], 16);
-        if (bytes == 0)
-          break;
-        else
-          num_bits += 16;
-      }
-
-      //pass to alias decoder
-      apx_embedded_alias_decode (opts, state, slot, num_bits, state->dmr_pdu_sf[slot]);
-
-      //clear out now stale storage
-      memset (state->dmr_pdu_sf[slot], 0, sizeof (state->dmr_pdu_sf[slot]));
-
-    }
-  }
+  apx_try_decode (opts, state, slot);
 }
 
 void apx_embedded_alias_decode (dsd_opts * opts, dsd_state * state, uint8_t slot, int16_t num_bits, uint8_t * input)
@@ -478,18 +503,25 @@ void apx_embedded_alias_dump (dsd_opts * opts, dsd_state * state, uint8_t slot, 
 void l3h_embedded_alias_blocks_phase1 (dsd_opts * opts, dsd_state * state, uint8_t slot, uint8_t * lc_bits)
 {
 
-  uint8_t op  = (uint8_t)ConvertBitIntoBytes(&lc_bits[0], 8);
-  uint8_t ptr = op-0x32;
+  if (slot > 1) return;
+  uint8_t op  = (uint8_t)ConvertBitIntoBytes(&lc_bits[0], 8) & 0x3F;
+  if (op < 0x32 || op > 0x35) return;
+  uint8_t ptr = op - 0x32;
   uint8_t bytes[7]; memset(bytes, 0, sizeof(bytes));
   for (uint8_t i = 0; i < 7; i++)
     bytes[i] = (uint8_t)ConvertBitIntoBytes(&lc_bits[16+(i*8)], 8);
 
-  //use +4 offset to match the MAC vPDU since that was already worked out long ago
-  memcpy(state->dmr_pdu_sf[slot]+4+(ptr*7), bytes, sizeof(bytes));
+  //use +4 offset to match the MAC vPDU layout
+  memcpy(state->p25_l3h_bytes[slot]+4+(ptr*7), bytes, sizeof(bytes));
+  state->p25_l3h_blk_ok[slot] |= (uint8_t)(1U << ptr);
 
-  //to be tested
-  if (ptr == 4) //is there always 4 blocks, or is it a variable amount?
-    l3h_embedded_alias_decode(opts, state, slot, 4+28, state->dmr_pdu_sf[slot]);
+  //only decode once all 4 blocks (0x32..0x35) have arrived
+  if (state->p25_l3h_blk_ok[slot] == 0x0F)
+  {
+    l3h_embedded_alias_decode(opts, state, slot, 4+27, state->p25_l3h_bytes[slot]);
+    state->p25_l3h_blk_ok[slot] = 0;
+    memset (state->p25_l3h_bytes[slot], 0, sizeof(state->p25_l3h_bytes[slot]));
+  }
 }
 
 void l3h_embedded_alias_decode (dsd_opts * opts, dsd_state * state, uint8_t slot, int16_t len, uint8_t * input)
@@ -568,9 +600,6 @@ void l3h_embedded_alias_decode (dsd_opts * opts, dsd_state * state, uint8_t slot
   //debug
   // fprintf (stderr, "\n WR: %d TG: %d SRC: %d Res: %d Len: %d STR: %s", wr, ttg, tsrc, res, len, str);
 
-  //reset storage
-  memset (state->dmr_pdu_sf[slot], 0, sizeof (state->dmr_pdu_sf[slot]));
-
 }
 
 void tait_iso7_embedded_alias_decode (dsd_opts * opts, dsd_state * state, uint8_t slot, int16_t len, uint8_t * input)
@@ -636,6 +665,53 @@ void tait_iso7_embedded_alias_decode (dsd_opts * opts, dsd_state * state, uint8_
   }
 }
 
+//DMR Embedded Talker Alias (ETSI TS 102 361-2 7.2.18 - 7.2.19)
+//The alias is carried as a Header (FLCO 4) and up to 3 Blocks (FLCO 5,6,7) in the embedded LC,
+//one LC per voice superframe (360ms), so a full alias spans several superframes over the air.
+//Pieces are stored in dedicated per slot storage (not dmr_pdu_sf) so that unrelated data/CACH
+//error resets don't wipe a partially received alias, and blocks received before the header are kept.
+
+//current source id for a slot
+static uint32_t dmr_ta_current_src (dsd_state * state, uint8_t slot)
+{
+  if (slot == 0) return (uint32_t)state->lastsrc;
+  else return (uint32_t)state->lastsrcR;
+}
+
+//reset the per slot talker alias pieces and display string
+void dmr_talker_alias_reset (dsd_state * state, uint8_t slot)
+{
+  if (slot > 1) return;
+  state->dmr_alias_block_len[slot] = 0;
+  state->dmr_alias_char_size[slot] = 0;
+  state->dmr_alias_format[slot] = 0;
+  state->dmr_alias_hdr_ok[slot] = 0;
+  state->dmr_alias_blk_ok[slot] = 0;
+  state->dmr_alias_src[slot] = 0;
+  memset (state->dmr_alias_hdr_bits[slot], 0, sizeof(state->dmr_alias_hdr_bits[slot]));
+  memset (state->dmr_alias_blk_bits[slot], 0, sizeof(state->dmr_alias_blk_bits[slot]));
+  sprintf (state->generic_talker_alias[slot], "%s", "");
+}
+
+//called whenever a slot's source id is (re)asserted by voice link control; when the talker
+//changes, drop the old talker's pieces so the new talker starts clean
+void dmr_talker_alias_sync_source (dsd_state * state, uint8_t slot, uint32_t source)
+{
+  if (slot > 1 || source == 0) return;
+  if (state->dmr_alias_src[slot] == source) return;
+
+  dmr_talker_alias_reset (state, slot);
+  state->dmr_alias_src[slot] = source;
+}
+
+//make sure stored pieces belong to the current talker before adding new ones
+static void dmr_ta_check_owner (dsd_state * state, uint8_t slot)
+{
+  uint32_t source = dmr_ta_current_src (state, slot);
+  if (source != 0 && state->dmr_alias_src[slot] != source)
+    dmr_talker_alias_sync_source (state, slot, source);
+}
+
 void dmr_talker_alias_lc_header (dsd_opts * opts, dsd_state * state, uint8_t slot, uint8_t * lc_bits)
 {
   uint8_t format = (uint8_t)ConvertBitIntoBytes(&lc_bits[16], 2);
@@ -646,181 +722,131 @@ void dmr_talker_alias_lc_header (dsd_opts * opts, dsd_state * state, uint8_t slo
   else if (format == 1 || format == 2) char_size = 8;
   else char_size = 16;
 
+  dmr_ta_check_owner (state, slot);
+
   state->dmr_alias_format[slot] = format;
-  state->dmr_alias_block_len[slot] = block_len; //data len, see below
+  state->dmr_alias_block_len[slot] = block_len; //number of characters in the alias
   state->dmr_alias_char_size[slot] = char_size;
 
-  //load into dmr_pdu_sf as bit wise values for this since iso7 has 49 bits in this header, otherwise, load with 48?
+  //iso7 carries 49 alias bits in the header, other formats carry 48 (after 1 reserved bit)
+  memset (state->dmr_alias_hdr_bits[slot], 0, sizeof(state->dmr_alias_hdr_bits[slot]));
   if (char_size == 7)
-    memcpy(state->dmr_pdu_sf[slot], lc_bits+23, 49*sizeof(uint8_t));
-  else if (char_size == 8) 
-    memcpy(state->dmr_pdu_sf[slot], lc_bits+24, 48*sizeof(uint8_t));
-  else if (char_size == 16)
-    memcpy(state->dmr_pdu_sf[slot], lc_bits+24, 48*sizeof(uint8_t));
+    memcpy (state->dmr_alias_hdr_bits[slot], lc_bits+23, 49*sizeof(uint8_t));
+  else
+    memcpy (state->dmr_alias_hdr_bits[slot], lc_bits+24, 48*sizeof(uint8_t));
+  state->dmr_alias_hdr_ok[slot] = 1;
 
-  //TEST: The Block Len (Data Lan) value is, according to my interpretation, the number of encoded 
-  //character units in the alias, test to verify, but fall back to the ptr index if necessary
-  //this is referenced in  5.4.3 ETSI TS 102 361-2 V2.5.1 (2023-05) 7.2.19 Talker Alias Data Length
+  fprintf (stderr, " Slot %d - Talker Alias LC Header; Format %d; Char Len: %d; Char Size: %d;", slot+1, format, block_len, char_size);
 
-  fprintf (stderr, " Slot %d - Talker Alias LC Header; Format %d; Char Len: %d; Char Size: %d;", slot, format, block_len, char_size);
-
-  //Decode the header's alias portion
+  //Decode the header's alias portion (and any blocks that arrived before it)
   fprintf (stderr, "\n");
-  dmr_talker_alias_lc_decode(opts, state, slot, 0, char_size, block_len);
+  dmr_talker_alias_lc_decode (opts, state, slot, 0, char_size, block_len);
 }
 
 void dmr_talker_alias_lc_blocks (dsd_opts * opts, dsd_state * state, uint8_t slot, uint8_t block_num, uint8_t * lc_bits)
 {
-  UNUSED(opts); //delete if we don't use this, but may want it if we dump alias to a file later on
-  uint8_t block_len = state->dmr_alias_block_len[slot];
-  uint8_t char_size = state->dmr_alias_char_size[slot];
-  uint16_t ptr = 0;
-  uint16_t end = block_len;
-
-  //Note: The Joann sample only carries block 5, and no header on block 4
-  //another radio on that ham setup also has a broken alias similar, but
-  //the other talkers have the 04 and the sample has a good decode otherwise
-  //debug broken aliasing on ham radio
-
-  // if (char_size == 0) //Enable this is you need to check alias even with missing header (set 7, 8, or 16)
-  //   char_size = 8;
-
-  /*
-    22:54:51 Sync: +DMR   slot1  [SLOT2] | Color Code=01 | VC6 
-    Slot 1 - Talker Alias Block Num: 1; Valid Block; Talker Alias:       Joann  
-    DMR PDU Payload [05][00][4A][6F][61][6E][6E][00][FF]
-  */
-
-  //set the pointer to the current index of the dmr_pdu_sf
-  if (char_size == 16)
-    ptr = 48 + (block_num * 56);
-  else if (char_size == 8)
-    ptr = 48 + (block_num * 56);
-  else if (char_size == 7)
-    ptr = 49 + (block_num * 56);
-
-  if (char_size == 0) //unset, no header received
-    fprintf (stderr, " Slot %d - Talker Alias Block Num: %d; Invalid Header;", slot, block_num+1);
-
-  else if (block_num > 3) //invalid block (data error)
-    fprintf (stderr, " Slot %d - Talker Alias Block Num: %d; Invalid Block;", slot, block_num+1);
-
-  else //valid header present, continue
+  if (block_num > 2) //invalid block (data error)
   {
-    if (char_size == 7)
-    {
-      memcpy(state->dmr_pdu_sf[slot]+ptr, lc_bits+16, 56*sizeof(uint8_t));
-      ptr += 56;
-      if (block_len == 0)
-        end = ptr / 7;
-      else end = block_len;
-    }
-    else if (char_size == 8)
-    {
-      memcpy(state->dmr_pdu_sf[slot]+ptr, lc_bits+16, 56*sizeof(uint8_t));
-      ptr += 56;
-      if (block_len == 0)
-        end = ptr / 8;
-      else end = block_len;
-    }
-    else if (char_size == 16)
-    {
-      memcpy(state->dmr_pdu_sf[slot]+ptr, lc_bits+16, 56*sizeof(uint8_t));
-      ptr += 56;
-      if (block_len == 0)
-        end = ptr / 16;
-      else end = block_len;
-    }
-
-    dmr_talker_alias_lc_decode (opts, state, slot, block_num+1, char_size, end);
+    fprintf (stderr, " Slot %d - Talker Alias Block Num: %d; Invalid Block;", slot+1, block_num+1);
+    return;
   }
+
+  dmr_ta_check_owner (state, slot);
+
+  //always keep the block, even if the header hasn't been received yet
+  memcpy (state->dmr_alias_blk_bits[slot][block_num], lc_bits+16, 56*sizeof(uint8_t));
+  state->dmr_alias_blk_ok[slot] |= (uint8_t)(1 << block_num);
+
+  if (state->dmr_alias_hdr_ok[slot] == 0)
+  {
+    fprintf (stderr, " Slot %d - Talker Alias Block Num: %d; Stored, Waiting for Header;", slot+1, block_num+1);
+    return;
+  }
+
+  dmr_talker_alias_lc_decode (opts, state, slot, block_num+1, state->dmr_alias_char_size[slot], state->dmr_alias_block_len[slot]);
 }
 
-//Decode partial or completed alias
+//Decode partial or completed alias from the stored header and blocks
 void dmr_talker_alias_lc_decode (dsd_opts * opts, dsd_state * state, uint8_t slot, uint8_t block_num, uint8_t char_size, uint16_t end)
 {
   UNUSED(opts);
   uint16_t i = 0;
-  fprintf (stderr, " Slot %d - Talker Alias Block Num: %d; Valid Block;", slot, block_num+1);
+
+  if (char_size != 7 && char_size != 8 && char_size != 16) return;
+
+  //assemble header + blocks into one contiguous bit array
+  uint8_t bits[49+(3*56)]; memset (bits, 0, sizeof(bits));
+  uint16_t hdr_len = (char_size == 7) ? 49 : 48;
+  memcpy (bits, state->dmr_alias_hdr_bits[slot], hdr_len);
+  for (i = 0; i < 3; i++)
+    memcpy (bits+hdr_len+(i*56), state->dmr_alias_blk_bits[slot][i], 56);
+
+  //number of contiguous valid bits from the start (header, then blocks in order)
+  uint16_t avail = hdr_len;
+  for (i = 0; i < 3; i++)
+  {
+    if (state->dmr_alias_blk_ok[slot] & (1 << i)) avail += 56;
+    else break;
+  }
+
+  uint16_t max_chars = (uint16_t)((hdr_len + (3*56)) / char_size);
+  uint16_t total = end;
+  uint8_t complete = 0;
+  if (total == 0 || total > max_chars) //unknown or invalid length, fall back to what is available
+  {
+    total = (uint16_t)(avail / char_size);
+    complete = (state->dmr_alias_blk_ok[slot] == 0x07);
+  }
+  else complete = (avail >= (uint16_t)(total * char_size));
+
+  if (!complete)
+  {
+    fprintf (stderr, " Slot %d - Talker Alias Block Num: %d; Valid Block (Incomplete);", slot+1, block_num+1);
+    return;
+  }
+
+  fprintf (stderr, " Slot %d - Talker Alias Block Num: %d; Valid Block;", slot+1, block_num+1);
   fprintf (stderr, " Talker Alias: ");
 
   char alias_string[500]; memset (alias_string, 0, sizeof(alias_string));
-  sprintf (alias_string, "%s", "");
+  int ptr = 0;
 
-  if (char_size == 7)
+  if (char_size == 7 || char_size == 8)
   {
-    for (i = 0; i < end; i++)
+    for (i = 0; i < total; i++)
     {
-      uint8_t character = (uint8_t)ConvertBitIntoBytes(&state->dmr_pdu_sf[slot][(i*7)], 7);
-      char ch[2]; ch[0] = character; ch[1] = 0;
-      if (character >= 0x20 && character <= 0x7E) //Standard ASCII Set
-      {
-        fprintf (stderr, "%c", character);
-        strcat (alias_string, ch);
-      }
-      // else if (character == 0)
-      // {
-      //   strcat (alias_string, " ");
-      //   fprintf (stderr, " ");
-      //   break;
-      // }
-      else
-      {
-        strcat (alias_string, " ");
-        fprintf (stderr, " ");
-      }
+      uint8_t character = (uint8_t)ConvertBitIntoBytes(&bits[i*char_size], char_size);
+      uint8_t ok = 0;
+      if (char_size == 7) ok = (character >= 0x20 && character <= 0x7E); //Standard ASCII Set
+      else ok = (character >= 0x20 && character != 0x7F); //allow some extended diacritical characters as well
+      if (!ok) character = 0x20;
+      fprintf (stderr, "%c", character);
+      alias_string[ptr++] = (char)character;
     }
   }
-  else if (char_size == 8)
+  else //16-bit (UTF-16BE)
   {
-    for (i = 0; i < end; i++)
-    {
-      uint8_t character = (uint8_t)ConvertBitIntoBytes(&state->dmr_pdu_sf[slot][(i*8)], 8);
-      char ch[2]; ch[0] = character; ch[1] = 0;
-      // if (character >= 0x20 && character <= 0x7E) //Standard ASCII Set
-      if (character >= 0x20 && character != 0x7F) //allow some extended UTF diacritical characters as well
-      {
-        fprintf (stderr, "%c", character);
-        strcat (alias_string, ch);
-      }
-      // else if (character == 0)
-      // {
-      //   strcat (alias_string, " ");
-      //   fprintf (stderr, " ");
-      //   break;
-      // }
-      else
-      {
-        strcat (alias_string, " ");
-        fprintf (stderr, " ");
-      }
-    }
-  }
-  else if (char_size == 16)
-  {
-    int ptr = 0;
     setlocale(LC_ALL, ""); //needed when encoded alias contains Chinese (or probably any non-roman charset that isn't default on users terminal)
-    for (i = 0; i < end; i++)
+    for (i = 0; i < total; i++)
     {
-      uint16_t character = (uint16_t)ConvertBitIntoBytes(&state->dmr_pdu_sf[slot][(i*16)], 16);
-      
-      if (character >= 0x20 && character != 0x7F)
-        fprintf (stderr, "%lc", character);
-      else fprintf (stderr, " ");
-
-      //Encode to UTF-8
-      ptr += utf8_encode(character, alias_string+ptr);
-
-      //debug
-      // fprintf (stderr, " [%04X], ", character);
+      uint16_t character = (uint16_t)ConvertBitIntoBytes(&bits[i*16], 16);
+      if (character < 0x20 || character == 0x7F) character = 0x20;
+      fprintf (stderr, "%lc", character);
+      ptr += utf8_encode(character, alias_string+ptr); //Encode to UTF-8
     }
   }
+  alias_string[ptr] = 0;
+
+  //trim trailing padding
+  while (ptr > 0 && alias_string[ptr-1] == ' ')
+    alias_string[--ptr] = 0;
+
+  fprintf (stderr, " (Complete)");
 
   //assign to string for event history and ncurses display
-  uint32_t source = 0;
-  if (slot == 0)
-    source = state->lastsrc;
-  else source = state->lastsrcR;
+  uint32_t source = dmr_ta_current_src (state, slot);
+
+  if (alias_string[0] == 0) return;
 
   if (state->event_history_s[slot].Event_History_Items[0].source_id == source)
     sprintf (state->event_history_s[slot].Event_History_Items[0].alias, "%s; ", alias_string);

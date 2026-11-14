@@ -130,8 +130,12 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
   //Variable reset/set section
 
   //set lls sync types
-  if (state->synctype >= 0)
+  if (opts->frame_aprs == 1)
+    lls = 44;
+  else if (state->synctype >= 0)
     lls = state->synctype;
+  else if (lls == 44)
+    lls = -1;
 
   //EDACS Channel Tree
   if ( (lls == 14 || lls == 15 || lls == 37 || lls == 38) && state->carrier == 1)
@@ -259,6 +263,12 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
     printw (" FRQ: %i;", opts->rtlsdr_center_freq);
     if (opts->rtl_udp_port != 0) printw ("\n| External RTL Tuning on UDP Port: %i", opts->rtl_udp_port);
     printw ("\n");
+  }
+
+  if (opts->audio_gain == 0 && ambe_hw_is_active())
+  {
+    state->aout_gain  = 25.0f;
+    state->aout_gainR = 25.0f;
   }
 
   if (opts->audio_out_type == 0 && opts->analog_only == 0)
@@ -514,7 +524,7 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
   {
     printw ("| Scan Mode: ");
     if (state->lcn_freq_roll != 0)
-      printw (" Frequency: %.06lf Mhz", (double)state->trunk_lcn_freq[state->lcn_freq_roll-1]/1000000);
+      printw (" Freq: %.06lf MHz", (double)state->trunk_lcn_freq[state->lcn_freq_roll-1]/1000000);
     printw (" Speed: %.02lf sec \n", opts->trunk_hangtime);  //not sure values less than 1 make a difference, may be system/environment dependent
   }
 
@@ -525,53 +535,123 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
   printw ("------------------------------------------------------------------------------\n");
   attroff(COLOR_PAIR(4));
 
+  int filter_mismatch = 0;
+  if (lls == 10 || lls == 11 || lls == 12 || lls == 13 || lls == 32 || lls == 33 || lls == 34 || opts->frame_dmr == 1)
+  {
+    if (state->dmr_color_code > 15)
+    {
+      filter_mismatch = 1;
+    }
+    else if (opts->dmr_cc_filter >= 0 && opts->dmr_cc_filter <= 15 &&
+             (int)state->dmr_color_code != opts->dmr_cc_filter)
+    {
+      filter_mismatch = 1;
+    }
+  }
+  if (opts->nxdn_ran_filter >= 0 && opts->nxdn_ran_filter <= 63 &&
+      (lls == 28 || lls == 29 || opts->frame_nxdn48 == 1 || opts->frame_nxdn96 == 1) &&
+      ((int)state->nxdn_last_ran < 0 || (int)state->nxdn_last_ran > 63 ||
+       (int)state->nxdn_last_ran != opts->nxdn_ran_filter))
+  {
+    filter_mismatch = 1;
+  }
+  if (opts->p25_nac_filter >= 0 && opts->p25_nac_filter <= 0xFFF &&
+      (lls == 0 || lls == 1 || lls == 35 || lls == 36 || opts->frame_p25p1 == 1 || opts->frame_p25p2 == 1))
+  {
+    int cur_p25_nac = (lls == 35 || lls == 36 || state->nac == 0) ? (int)state->p2_cc : (int)state->nac;
+    if (cur_p25_nac == 0 || cur_p25_nac != opts->p25_nac_filter)
+    {
+      filter_mismatch = 1;
+    }
+  }
+  if (opts->tetra_cc_filter >= 0 && opts->tetra_cc_filter <= 63 &&
+      (lls == 41 || lls == 42 || lls == 43 || opts->frame_tetra == 1) &&
+      (!state->tetra_scramb_valid || (int)state->tetra_colour_code != opts->tetra_cc_filter))
+  {
+    filter_mismatch = 1;
+  }
+  int carrier_color = (state->carrier == 1 && !filter_mismatch) ? 3 : 6;
+
   if (state->carrier == 1)
   {
-    attron(COLOR_PAIR(3));
+    attron(COLOR_PAIR(carrier_color));
     level = (int) state->max / 164; //only update on carrier present
+    if (opts->frame_aprs == 1) level = (int) state->aprs_peak / 164;
     if (opts->mod_qpsk == 1) level = (int) state->max / 328; //test values here
     if (opts->audio_in_type == 4) level = 50; //hard set when reading symbol bin files, otherwise, it will just be near zero
     if (level > 100) level = 100; //cap max at 100 to prevent it going over
+    if (level < 0) level = 0;
+  }
+  else if (opts->frame_aprs == 1 && state->aprs_peak > 0)
+  {
+    level = (int) state->aprs_peak / 164;
+    if (level > 100) level = 100;
+    if (level < 0) level = 0;
   }
   else level = 0;
 
   printw ("--Audio Decode----------------------------------------------------------------\n");
   printw ("| Demod/Rate:  ");
-  if (opts->mod_qpsk == 1) printw ("[QPSK]");
-  if (opts->mod_c4fm == 1) printw ("[C4FM]");
-  if (opts->mod_gfsk == 1) printw ("[GFSK]");
-  printw ( "[%d] \n", (48000*opts->wav_interpolator)/state->samplesPerSymbol);
-  printw ("| Decoding:    [%s] ", opts->output_name);
-  if (opts->aggressive_framesync == 0) printw ("CRC/(RAS) ");
+  if (opts->frame_aprs == 1)
+  {
+    printw ("[AFSK][%d] \n", (state->aprs_baud > 0) ? state->aprs_baud : 1200);
+  }
+  else
+  {
+    if (opts->mod_qpsk == 1) printw ("[QPSK]");
+    if (opts->mod_c4fm == 1) printw ("[C4FM]");
+    if (opts->mod_gfsk == 1) printw ("[GFSK]");
+    if (opts->frame_tetra == 1) printw ("[18000] \n");
+    else printw ( "[%d] \n", (48000*opts->wav_interpolator)/state->samplesPerSymbol);
+  }
+  printw ("| Decoding:    [%s]", opts->output_name);
+  if (opts->frame_tetra == 1) printw ("[%s]", tetra_voice_codec_available() ? "ACELP" : "Data Only");
+  else if (opts->frame_aprs == 1) printw ("[AX.25 Packet]");
+  else if (opts->frame_m17 == 0 && opts->analog_only == 0) printw ("[%s]", ambe_hw_status_str());
+  if (opts->aggressive_framesync == 0 && opts->frame_aprs == 0) printw ("[CRC/(RAS)]");
+  if (opts->dmr_cc_filter >= 0 && opts->dmr_cc_filter <= 15 && opts->frame_dmr == 1) printw ("[DCC Filter: %02d]", opts->dmr_cc_filter);
+  if (opts->nxdn_ran_filter >= 0 && opts->nxdn_ran_filter <= 63 && (opts->frame_nxdn48 == 1 || opts->frame_nxdn96 == 1)) printw ("[RAN Filter: %02d]", opts->nxdn_ran_filter);
+  if (opts->p25_nac_filter >= 0 && opts->p25_nac_filter <= 0xFFF && (opts->frame_p25p1 == 1 || opts->frame_p25p2 == 1)) printw ("[NAC Filter: %03X]", opts->p25_nac_filter);
+  if (opts->tetra_cc_filter >= 0 && opts->tetra_cc_filter <= 63 && opts->frame_tetra == 1) printw ("[TCC Filter: %02d]", opts->tetra_cc_filter);
   //debug -- troubleshoot voice tuning after grant on DMR CC, subsequent grant may not tune because tuner isn't available
-  if (opts->p25_trunk == 1 && opts->p25_is_tuned == 1) printw ("Tuner Locked    ");
-  if (opts->p25_trunk == 1 && opts->p25_is_tuned == 0) printw ("Tuner Available ");
+  if (opts->p25_trunk == 1 && opts->p25_is_tuned == 1) printw ("[Tuner Locked]");
+  if (opts->p25_trunk == 1 && opts->p25_is_tuned == 0) printw ("[Tuner Available]");
   printw ("\n");
   printw ("| In Level:    [%02d%%] \n", level);
 
-  if (opts->dmr_stereo == 0)
+  if (opts->dmr_stereo == 0 && opts->frame_tetra == 0 && opts->frame_aprs == 0)
   {
-    printw ("| Voice Error: [%X][%X]", state->errs&0xF, state->errs2&0xF);
+    float ber0 = ambe_hw_get_slot_ber(0);
+    const char *st0 = ambe_hw_slot_status_str(0);
+    printw ("| Voice Error: [%.1f%%]", ber0);
     if (opts->slot1_on == 0) printw (" OFF");
     if (opts->slot1_on == 1) printw (" ON");
+    if (st0[0] != 0) printw (" %s", st0);
     printw ("\n");
   }
 
-  if (opts->dmr_stereo == 1)
+  if (opts->dmr_stereo == 1 && opts->frame_tetra == 0 && opts->frame_aprs == 0)
   {
-    printw ("| Voice Error: [%X][%X] Slot 1 (1)", state->errs&0xF, state->errs2&0xF);
+    float ber0 = ambe_hw_get_slot_ber(0);
+    float ber1 = ambe_hw_get_slot_ber(1);
+    const char *st0 = ambe_hw_slot_status_str(0);
+    const char *st1 = ambe_hw_slot_status_str(1);
+
+    printw ("| Voice Error: [%.1f%%] Slot 1 (1)", ber0);
     if (opts->slot1_on == 0) printw (" OFF");
     if (opts->slot1_on == 1) printw (" ON");
+    if (st0[0] != 0) printw (" %s", st0);
     if (opts->slot_preference == 0) printw (" *Preferred (3)");
     printw ("\n");
-    printw ("| Voice Error: [%X][%X] Slot 2 (2)", state->errsR&0xF, state->errs2R&0xF);
+
+    printw ("| Voice Error: [%.1f%%] Slot 2 (2)", ber1);
     if (opts->slot2_on == 0) printw (" OFF");
     if (opts->slot2_on == 1) printw (" ON");
+    if (st1[0] != 0) printw (" %s", st1);
     if (opts->slot_preference == 1) printw (" *Preferred (3)");
     printw ("\n");
   }
   printw ("------------------------------------------------------------------------------\n");
-
   printw ("--Call Info-------------------------------------------------------------------\n");
 
   //DSTAR
@@ -589,6 +669,169 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
     printw ("\n");
     printw ("| DATA: %s", state->dstar_gps);
     printw ("\n");
+  }
+
+  //TETRA
+  if ((lls == 41 || lls == 42 || lls == 43) && state->carrier == 1 && state->tetra_mode == 2)
+  {
+    printw ("| TETRA - TMO Uplink (Mobile Station)\n");
+    if (state->tetra_call_type[0] != '\0')
+      printw ("| Burst: %s\n", state->tetra_call_type);
+  }
+  else if ((lls == 41 || lls == 42 || lls == 43) && state->carrier == 1 && state->tetra_mode == 1)
+  {
+    int is_enc = (state->tetra_enc || state->tetra_aie_enc || state->tetra_sec_class >= 2) ? 1 : 0;
+    const char *tea_str = tetra_get_tea_name(state, is_enc);
+    const char *comm_str = (state->tetra_dmo_comm_type == 1) ? "DM-REP" :
+                           (state->tetra_dmo_comm_type == 2) ? "DM-GATE" :
+                           (state->tetra_dmo_comm_type == 3) ? "DM-REP/GATE" : "Direct MS-MS";
+
+    if (is_enc)
+    {
+      printw ("| TETRA DMO (%s) - MCC: %u; MNC: %u; Encrypted (%s)\n",
+              comm_str, state->tetra_mcc, state->tetra_mnc, tea_str);
+      if (state->tetra_matched_key_len > 0 && state->tetra_matched_key_str[0] != '\0')
+        printw ("| Key: %s\n", state->tetra_matched_key_str);
+    }
+    else
+    {
+      printw ("| TETRA DMO (%s) - MCC: %u; MNC: %u; Clear\n",
+              comm_str, state->tetra_mcc, state->tetra_mnc);
+    }
+
+    if (state->tetra_call_type[0] != '\0' || state->tetra_last_tg != 0 || state->tetra_last_src != 0)
+    {
+      printw ("| Call: %s", state->tetra_call_type[0] ? state->tetra_call_type : "Active");
+      if (state->tetra_last_tg != 0)
+        printw ("; TGT: %u", state->tetra_last_tg);
+      if (state->tetra_last_src != 0)
+        printw ("; SRC: %u", state->tetra_last_src);
+      printw ("\n");
+    }
+    else
+    {
+      printw ("| Call: Idle\n");
+    }
+    if (state->tetra_sds_str[0] != 0)
+      printw ("| SDS: %.71s\n", state->tetra_sds_str);
+    if (state->tetra_lip_str[0] != 0)
+      printw ("| LIP: %.71s\n", state->tetra_lip_str);
+  }
+  else if ((lls == 41 || lls == 42 || lls == 43) && state->carrier == 1 && state->tetra_scramb_valid == 1 && !filter_mismatch)
+  {
+    int is_enc = (state->tetra_enc || state->tetra_aie_enc || state->tetra_sec_class >= 2) ? 1 : 0;
+    const char *tea_str = tetra_get_tea_name(state, is_enc);
+
+    if (is_enc)
+    {
+      const char *sc_str = (state->tetra_sec_class == 2) ? "SC2-SCK" :
+                           (state->tetra_sec_class == 3) ? "SC3-DCK" : "SC2/3";
+      printw ("| TETRA - MCC: %u; MNC: %u; LA: %u; CC: %02u; Encrypted (%s, %s)\n",
+              state->tetra_mcc, state->tetra_mnc, state->tetra_la, state->tetra_colour_code, tea_str, sc_str);
+      if (state->tetra_matched_key_len > 0 && state->tetra_matched_key_str[0] != '\0')
+        printw ("| Key: %s\n", state->tetra_matched_key_str);
+    }
+    else
+      printw ("| TETRA - MCC: %u; MNC: %u; LA: %u; CC: %02u; Clear (SC1)\n",
+              state->tetra_mcc, state->tetra_mnc, state->tetra_la, state->tetra_colour_code);
+    if (state->tetra_dl_freq_mhz > 0.0)
+      printw ("| Main Carrier: %.06lf MHz (%u)\n", state->tetra_dl_freq_mhz, state->tetra_main_carrier);
+    else
+      printw ("| Main Carrier: ---.------ MHz\n");
+    for (int s = 0; s < 4; s++)
+    {
+      uint8_t tn = (uint8_t)(s + 1);
+      if (state->tetra_ts_type[s][0] != '\0')
+      {
+        printw ("| TN %u: %s", tn, state->tetra_ts_type[s]);
+        if (state->tetra_ts_tg[s] != 0)
+          printw ("; TGT: %u", state->tetra_ts_tg[s]);
+        if (state->tetra_ts_src[s] != 0)
+          printw ("; SRC: %u", state->tetra_ts_src[s]);
+
+        if (state->tetra_ts_usage[s] > 3 && state->tetra_voice_slot != 0 && state->tetra_voice_slot != tn)
+          printw (" [Busy]");
+        printw ("\n");
+      }
+      else if (state->tetra_ts_usage[s] == 2)
+      {
+        printw ("| TN %u: Control (MCCH)\n", tn);
+      }
+      else if (state->tetra_ts_usage[s] == 1 || state->tetra_ts_usage[s] == 3)
+      {
+        printw ("| TN %u: Signalling (SCH)\n", tn);
+      }
+      else
+      {
+        printw ("| TN %u: Idle\n", tn);
+      }
+    }
+    if (state->tetra_lip_str[0] != 0)
+      printw ("| LIP: %.71s\n", state->tetra_lip_str);
+    if (state->tetra_nc_count > 0)
+    {
+      for (uint8_t i = 0; i < state->tetra_nc_count; i++)
+      {
+        if (i == 0)
+          printw ("| Cell Neighbours: ");
+        else if (i % 2 == 0)
+          printw ("\n|                  ");
+        else
+          printw ("; ");
+        if (state->tetra_nc_freqs[i] > 0.0)
+          printw ("%.06lf MHz (%u)", state->tetra_nc_freqs[i], state->tetra_nc_carriers[i]);
+        else
+          printw ("(%u)", state->tetra_nc_carriers[i]);
+      }
+      printw ("\n");
+    }
+    else
+    {
+      printw ("| Cell Neighbours: None\n");
+    }
+  }
+
+  //APRS
+  if (lls == 44 || opts->frame_aprs == 1)
+  {
+    printw ("| APRS (%d bps) - Packets Decoded: %u\n",
+            (state->aprs_baud > 0) ? state->aprs_baud : 1200, state->aprs_pkt_count);
+    if (state->aprs_src[0] != '\0')
+    {
+      printw ("| FROM: %-9s (%08u)  TO: %-9s", state->aprs_src, state->aprs_src_id, state->aprs_dst);
+      if (state->aprs_path[0] != '\0')
+        printw ("  VIA: %.26s", state->aprs_path);
+      printw ("\n");
+      printw ("| TYPE: %-10s", state->aprs_type);
+      if (state->aprs_symbol[0] != '\0')
+        printw ("  SYM: %s (%s)", state->aprs_symbol, state->aprs_symbol_desc);
+      printw ("\n");
+      if (state->aprs_has_pos)
+      {
+        printw ("| GPS:  %.5f %c, %.5f %c",
+                (state->aprs_lat >= 0.0) ? state->aprs_lat : -state->aprs_lat,
+                (state->aprs_lat >= 0.0) ? 'N' : 'S',
+                (state->aprs_lon >= 0.0) ? state->aprs_lon : -state->aprs_lon,
+                (state->aprs_lon >= 0.0) ? 'E' : 'W');
+        if (state->aprs_speed_kmh > 0.0 || state->aprs_course >= 0)
+        {
+          printw ("  SPD: %.1f km/h", state->aprs_speed_kmh);
+          if (state->aprs_course >= 0)
+            printw ("  CSE: %03d", state->aprs_course);
+        }
+        if (state->aprs_has_alt)
+          printw ("  ALT: %.0f m", state->aprs_altitude_m);
+        printw ("\n");
+      }
+      if (state->aprs_wx_str[0] != '\0')
+        printw ("| WX:   %.68s\n", state->aprs_wx_str);
+      if (state->aprs_comment[0] != '\0')
+        printw ("| INFO: %.68s\n", state->aprs_comment);
+    }
+    else
+    {
+      printw ("| Waiting for AX.25 / APRS packet...\n");
+    }
   }
 
   //M17
@@ -760,7 +1003,7 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
         if (idas == 1) printw ("Monitoring RTCH2 Channel"); //Idas RTCH2 Channel
         if (state->p25_cc_freq != 0)
         {
-          printw (" - Frequency: %.06lf Mhz ", (double)state->p25_cc_freq/1000000);
+          printw (" - Freq: %.06lf MHz ", (double)state->p25_cc_freq/1000000);
         }
       }
       else if (opts->p25_is_tuned == 1)
@@ -769,7 +1012,7 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
         if (idas == 1) printw ("Monitoring RTCH2 Channel"); //Idas RTCH2
         if (state->p25_vc_freq[0] != 0)
         {
-          printw (" - Frequency: %.06lf Mhz ", (double)state->p25_vc_freq[0]/1000000);
+          printw (" - Freq: %.06lf MHz ", (double)state->p25_vc_freq[0]/1000000);
         }
       }
 
@@ -819,7 +1062,7 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
       }
       if (state->carrier == 1)
       {
-        attron(COLOR_PAIR(3));
+        attron(COLOR_PAIR(carrier_color));
       }
     }
 
@@ -838,13 +1081,13 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
       if (state->R == 0) attron(COLOR_PAIR(2));
       printw ("Scrambler ");
       if (state->R == 0) attroff(COLOR_PAIR(2));
-      attron(COLOR_PAIR(3));
+      attron(COLOR_PAIR(carrier_color));
       if (state->R != 0)
       {
         attron(COLOR_PAIR(1));
         printw ("Seed: %04llX ", state->payload_miN);
         printw ("Key: %05lld ", state->R );
-        attron(COLOR_PAIR(3));
+        attron(COLOR_PAIR(carrier_color));
       }
     }
     if (state->nxdn_cipher_type == 0x2 && state->carrier == 1)
@@ -855,7 +1098,7 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
       printw ("DES1 ");
       if (state->R != 0) printw ("Key: %016llX ", state->R);
       attroff(COLOR_PAIR(2));
-      attron(COLOR_PAIR(3));
+      attron(COLOR_PAIR(carrier_color));
     }
     if (state->nxdn_cipher_type == 0x3 && state->carrier == 1)
     {
@@ -865,14 +1108,14 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
       printw ("AES-256 ");
       if (state->aes_key_loaded[0] == 1) printw ("KS: %016llX", state->A4[0]);
       attroff(COLOR_PAIR(2));
-      attron(COLOR_PAIR(3));
+      attron(COLOR_PAIR(carrier_color));
     }
     if (state->nxdn_cipher_type > 0x3 && state->carrier == 1)
     {
       attron(COLOR_PAIR(2));
       printw ("Unknown Encryption ");
       attroff(COLOR_PAIR(2));
-      attron(COLOR_PAIR(3));
+      attron(COLOR_PAIR(carrier_color));
     }
 
     //Active Trunking Channels (NXDN and IDAS)
@@ -888,7 +1131,7 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
         if (state->active_channel[i] != 0) printw ("%s", state->active_channel[i]);
       }
 
-      if (state->carrier == 1) attron(COLOR_PAIR(3));
+      if (state->carrier == 1) attron(COLOR_PAIR(carrier_color));
       else attroff(COLOR_PAIR(4));
     }
 
@@ -905,44 +1148,65 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
     printw ("| ");
     if (lls > 1 && lls < 30)
     {
-      printw ("DMR BS - DCC: %02i; ", state->dmr_color_code);
+      if (state->dmr_color_code <= 15)
+        printw ("DMR BS - DCC: %02i; ", state->dmr_color_code);
+      else
+        printw ("DMR BS - DCC: XX; ");
       // printw ("%s %s", state->dmr_branding, state->dmr_branding_sub);
-      printw ("%s ", state->dmr_branding);
-      printw ("%s", state->dmr_branding_sub);
+      if (state->dmr_branding[0] != 0)
+        printw ("%s ", state->dmr_branding);
+      if (strcmp(state->dmr_branding_sub, "Cap+ ") == 0)
+        printw ("Cap+; ");
+      else
+        printw ("%s", state->dmr_branding_sub);
       printw ("%s", state->dmr_site_parms); //site id, net id, etc
       if (state->dmr_rest_channel > 0)
       {
-        printw ("Rest LSN: %02d; ", state->dmr_rest_channel);
-        if (state->trunk_chan_map[state->dmr_rest_channel] != 0)
+        if (opts->p25_trunk == 1 && state->trunk_chan_map[state->dmr_rest_channel] != 0)
         {
-          printw ("Freq: %.06lf Mhz", (double)state->trunk_chan_map[state->dmr_rest_channel]/1000000);
+          printw ("Freq: %.06lf MHz; ", (double)state->trunk_chan_map[state->dmr_rest_channel]/1000000);
         }
+        printw ("Rest LSN: %d ", state->dmr_rest_channel);
       }
-      else if (state->p25_cc_freq != 0)
+      else
       {
-        printw ("Freq: %.06lf MHz", (double)state->p25_cc_freq/1000000);
+        int cc_lpcn = trunk_get_t3_cc_lpcn(state);
+        if (opts->p25_trunk == 1 && state->p25_cc_freq != 0)
+        {
+          printw ("Freq: %.06lf MHz", (double)state->p25_cc_freq/1000000);
+          if (cc_lpcn > 0)
+            printw ("; ");
+          else
+            printw (" ");
+        }
+        if (cc_lpcn > 0)
+          printw ("LPCN: %d ", cc_lpcn);
       }
 
       if (state->dmr_is_ras == 1)
-        printw ("{RAS}");
+        printw ("[RAS]");
 
     }
     else if (lls == 32 || lls == 33 || lls == 34)
     {
-      printw ("DMR MS - DCC: %02i; ", state->dmr_color_code);
+      if (state->dmr_color_code <= 15)
+        printw ("DMR MS - DCC: %02i; ", state->dmr_color_code);
+      else
+        printw ("DMR MS - DCC: XX; ");
 
       if (state->dmr_is_ras == 1)
-        printw ("{RAS}");
+        printw ("[RAS]");
     }
     else if (lls == 0 || lls == 1) //P1
     {
       printw ("P25p1  - %05llX:%03llX:%03llX; RFSS: %lld SITE: %lld ", state->p2_wacn, state->p2_sysid, state->p2_cc, state->p2_rfssid, state->p2_siteid);
-      if (state->p25_cc_freq != 0)
+      if (opts->p25_trunk == 1 && state->p25_cc_freq != 0)
       {
         printw ("Freq: %.06lf MHz", (double)state->p25_cc_freq/1000000);
       }
 
       //load talker aliases here (Moto, Tait, Harris)
+      state->generic_talker_alias[0][0] = 0;
       for (int16_t i = 0; i < state->group_tally; i++)
       {
         if (state->group_array[i].groupNumber == state->lastsrc) //or state->lastsrc
@@ -960,23 +1224,26 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
       {
         attron(COLOR_PAIR(2));
         printw (" Phase 2 Missing Parameters ");
-        attron(COLOR_PAIR(3));
+        attroff(COLOR_PAIR(2));
+        if (state->carrier == 1) attron(COLOR_PAIR(carrier_color));
       }
       else if (state->p2_wacn == 0xFFFFF || state->p2_sysid == 0xFFF || state->p2_cc == 0xFFF)
       {
         attron(COLOR_PAIR(2));
         printw (" Phase 2 Invalid Parameters ");
-        attron(COLOR_PAIR(3));
+        attroff(COLOR_PAIR(2));
+        if (state->carrier == 1) attron(COLOR_PAIR(carrier_color));
       }
       else
       {
-        if (state->p25_cc_freq != 0)
+        if (opts->p25_trunk == 1 && state->p25_cc_freq != 0)
         {
           printw ("Freq: %.06lf MHz", (double)state->p25_cc_freq/1000000);
         }
       }
 
       //load talker aliases here (Moto, Tait, Harris)
+      state->generic_talker_alias[0][0] = 0;
       for (int16_t i = 0; i < state->group_tally; i++)
       {
         if (state->group_array[i].groupNumber == state->lastsrc)
@@ -987,6 +1254,7 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
       }
 
       //load talker aliases here (Moto, Tait, Harris)
+      state->generic_talker_alias[1][0] = 0;
       for (int16_t i = 0; i < state->group_tally; i++)
       {
         if (state->group_array[i].groupNumber == state->lastsrcR)
@@ -1009,7 +1277,7 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
     if (state->dmrburstL != 16 && state->carrier == 1 && state->lasttg > 0 && state->lastsrc > 0)
     {
       attroff(COLOR_PAIR(2));
-      attron(COLOR_PAIR(3));
+      attron(COLOR_PAIR(carrier_color));
     }
 
     printw ("%s | ", state->call_string[0]);
@@ -1027,7 +1295,7 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
       attron(COLOR_PAIR(5));
       printw (" **BP** ");
       attroff(COLOR_PAIR(5));
-      attron(COLOR_PAIR(3));
+      attron(COLOR_PAIR(carrier_color));
     }
 
     if(state->dmrburstL == 16 && state->payload_algid == 0 && state->K > 0 && state->dmr_fid == 0x10 && state->dmr_so & 0x40)
@@ -1035,7 +1303,7 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
       attron(COLOR_PAIR(1));
       printw ("BP Key: %3lld ", state->K);
       attroff(COLOR_PAIR(1));
-      attron(COLOR_PAIR(3));
+      attron(COLOR_PAIR(carrier_color));
     }
 
     if(state->dmrburstL == 16 && state->payload_algid == 0 && state->H > 0 && state->dmr_fid == 0x68 && state->dmr_so & 0x40)
@@ -1043,7 +1311,7 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
       attron(COLOR_PAIR(1));
       printw ("Hytera BP Key: %010llX ", state->H);
       attroff(COLOR_PAIR(1));
-      attron(COLOR_PAIR(3));
+      attron(COLOR_PAIR(carrier_color));
     }
 
     //ALG, KeyID, MI                            //was key_id
@@ -1052,7 +1320,7 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
       attron(COLOR_PAIR(1));
       printw ("ALG: 0x%02X KEY: 0x%02X MI: 0x%08llX ", state->payload_algid, state->payload_keyid, state->payload_mi);
       attroff(COLOR_PAIR(1));
-      attron(COLOR_PAIR(3));
+      attron(COLOR_PAIR(carrier_color));
     }
 
     //P25 FDMA/TDMA
@@ -1061,7 +1329,7 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
       attron(COLOR_PAIR(1));
       printw ("ALG: 0x%02X KEY: 0x%04X MI: 0x%016llX ", state->payload_algid, state->payload_keyid, state->payload_miP);
       attroff(COLOR_PAIR(1));
-      attron(COLOR_PAIR(3));
+      attron(COLOR_PAIR(carrier_color));
     }
 
     //Anytone 0x01 will never show here since its converted to 0x21 for handling
@@ -1070,54 +1338,54 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
       attron(COLOR_PAIR(1));
       printw("RC4 ");
       if (state->R != 0) { printw("Key: %010llX ", state->R); }
-      attron(COLOR_PAIR(3));
+      attron(COLOR_PAIR(carrier_color));
     }
     if (state->payload_algid == 0x81 || state->payload_algid == 0x22)
     {
       attron(COLOR_PAIR(1));
       printw("DES1 ");
       if (state->R != 0) { printw("Key: %010llX ", state->R); }
-      attron(COLOR_PAIR(3));
+      attron(COLOR_PAIR(carrier_color));
     }
     if (state->payload_algid == 0x9F)
     {
       attron(COLOR_PAIR(1));
       printw("DES-XL ");
       if (state->R != 0) { printw("Key: %010llX ", state->R); }
-      attron(COLOR_PAIR(3));
+      attron(COLOR_PAIR(carrier_color));
     }
     if (state->payload_algid == 0x82)
     {
       attron(COLOR_PAIR(1));
       printw("DES2 ");
-      attron(COLOR_PAIR(3));
+      attron(COLOR_PAIR(carrier_color));
     }
     if (state->payload_algid == 0x83)
     {
       attron(COLOR_PAIR(1));
       printw("DES3 ");
-      attron(COLOR_PAIR(3));
+      attron(COLOR_PAIR(carrier_color));
     }
     if (state->payload_algid == 0x89 || state->payload_algid == 0x24)
     {
       attron(COLOR_PAIR(1));
       printw("AES-128 ");
       if (state->aes_key_loaded[0] != 0) { printw("KS: %016llX ", state->A2[0]); }
-      attron(COLOR_PAIR(3));
+      attron(COLOR_PAIR(carrier_color));
     }
     if (state->payload_algid == 0x84 || state->payload_algid == 0x25 || state->payload_algid == 0x05)
     {
       attron(COLOR_PAIR(1));
       printw("AES-256 ");
       if (state->aes_key_loaded[0] != 0) { printw("KS: %016llX ", state->A4[0]); }
-      attron(COLOR_PAIR(3));
+      attron(COLOR_PAIR(carrier_color));
     }
     if (state->payload_algid == 0x26)
     {
       attron(COLOR_PAIR(1));
       printw("Caltta BP ");
       // if (state->aes_key_loaded[0] != 0) { printw("KS: %016llX ", state->A4[0]); } //TODO: This
-      attron(COLOR_PAIR(3));
+      attron(COLOR_PAIR(carrier_color));
     }
     if (state->payload_algid == 0x02)
     {
@@ -1125,14 +1393,14 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
       printw("Hytera Enhanced");
       if (state->R != 0)
           printw(" Key: %010llX", state->R);
-      attron(COLOR_PAIR(3));
+      attron(COLOR_PAIR(carrier_color));
     }
     if (state->payload_algid >= 0x31 && state->payload_algid <= 0x3A)
     {
       attron(COLOR_PAIR(1));
       printw("Kirisun Encryption ");
       if (state->aes_key_loaded[0] != 0) { printw("KS: %016llX ", state->A4[0]); }
-      attron(COLOR_PAIR(3));
+      attron(COLOR_PAIR(carrier_color));
     }
 
     printw ("\n");
@@ -1142,13 +1410,14 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
 
     attron(COLOR_PAIR(4));
 
-    if(state->dmrburstL == 16 || state->dmrburstL == 21 || state->dmrburstL == 26  || state->dmrburstL == 27 || state->dmrburstL == 32) //only during call
+    if(state->dmrburstL == 16 || state->dmrburstL == 2 || state->dmrburstL == 21 || state->dmrburstL == 26  || state->dmrburstL == 27 || state->dmrburstL == 32) //during call and DMR TLC
     {
 
       attron(COLOR_PAIR(4));
 
       //Embedded GPS (not LRRP)
-      printw  ("%s ", state->dmr_embedded_gps[0]);
+      if (state->dmrburstL != 2 && state->dmr_embedded_gps[0][0] != 0)
+        printw  ("%s ", state->dmr_embedded_gps[0]);
 
       //Embedded Talker Alias String
       printw ("%s ", state->generic_talker_alias[0]);
@@ -1156,7 +1425,7 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
       attroff(COLOR_PAIR(5));
       if (state->carrier == 1)
       {
-        attron(COLOR_PAIR(3));
+        attron(COLOR_PAIR(carrier_color));
       }
     }
 
@@ -1179,13 +1448,13 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
           printw ("[%s] ", state->group_array[k].groupMode);
           if (state->carrier == 1)
           {
-            attron(COLOR_PAIR(3));
+            attron(COLOR_PAIR(carrier_color));
           }
         }
       }
     }
 
-    if (state->carrier == 1) attron(COLOR_PAIR(3));
+    if (state->carrier == 1) attron(COLOR_PAIR(carrier_color));
     else attroff(COLOR_PAIR(4));
 
     printw ("\n");
@@ -1202,7 +1471,7 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
       if (state->dmrburstR != 16 && state->carrier == 1 && state->lasttgR > 0 && state->lastsrcR > 0)
       {
         attroff(COLOR_PAIR(2));
-        attron(COLOR_PAIR(3));
+        attron(COLOR_PAIR(carrier_color));
       }
 
       printw ("%s | ", state->call_string[1]);
@@ -1219,7 +1488,7 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
         attron(COLOR_PAIR(5));
         printw (" **BP** ");
         attroff(COLOR_PAIR(5));
-        attron(COLOR_PAIR(3));
+        attron(COLOR_PAIR(carrier_color));
       }
 
       if(state->dmrburstR == 16 && state->payload_algidR == 0 && state->K > 0 && state->dmr_soR & 0x40 && state->dmr_fidR == 0x10)
@@ -1227,14 +1496,14 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
         attron(COLOR_PAIR(1));
         printw ("BP Key: %3lld ", state->K);
         attroff(COLOR_PAIR(1));
-        attron(COLOR_PAIR(3));
+        attron(COLOR_PAIR(carrier_color));
       }
       if(state->dmrburstR == 16 && state->payload_algidR == 0 && state->H > 0 && state->dmr_soR & 0x40 && state->dmr_fidR == 0x68)
       {
         attron(COLOR_PAIR(1));
         printw ("Hytera BP Key: %010llX ", state->H);
         attroff(COLOR_PAIR(1));
-        attron(COLOR_PAIR(3));
+        attron(COLOR_PAIR(carrier_color));
       }
       //ALG, KeyID, MI 2                          //was keyidR
       if(state->dmrburstR == 16 && state->payload_algidR > 0 && state->dmr_soR & 0x40)
@@ -1242,7 +1511,7 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
         attron(COLOR_PAIR(1));
         printw ("ALG: 0x%02X KEY: 0x%02X MI: 0x%08llX ", state->payload_algidR, state->payload_keyidR, state->payload_miR);
         attroff(COLOR_PAIR(1));
-        attron(COLOR_PAIR(3));
+        attron(COLOR_PAIR(carrier_color));
       }
       //P25-P1 and P2
       if(state->dmrburstR > 19 && state->payload_algidR > 0 && state->payload_algidR != 0x80)
@@ -1250,7 +1519,7 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
         attron(COLOR_PAIR(1));
         printw ("ALG: 0x%02X KEY: 0x%04X MI: 0x%016llX ", state->payload_algidR, state->payload_keyidR, state->payload_miN);
         attroff(COLOR_PAIR(1));
-        attron(COLOR_PAIR(3));
+        attron(COLOR_PAIR(carrier_color));
       }
 
       //Anytone 0x01 will never show here since its converted to 0x21 for handling
@@ -1259,54 +1528,54 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
         attron(COLOR_PAIR(1));
         printw("RC4 ");
         if (state->RR != 0) { printw("Key: %010llX ", state->RR); }
-        attron(COLOR_PAIR(3));
+        attron(COLOR_PAIR(carrier_color));
       }
       if (state->payload_algidR == 0x81 || state->payload_algidR == 0x22)
       {
         attron(COLOR_PAIR(1));
         printw("DES1 ");
         if (state->RR != 0) { printw("Key: %010llX ", state->RR); }
-        attron(COLOR_PAIR(3));
+        attron(COLOR_PAIR(carrier_color));
       }
       if (state->payload_algidR == 0x9F)
       {
         attron(COLOR_PAIR(1));
         printw("DES-XL ");
         if (state->RR != 0) { printw("Key: %010llX ", state->RR); }
-        attron(COLOR_PAIR(3));
+        attron(COLOR_PAIR(carrier_color));
       }
       if (state->payload_algidR == 0x82)
       {
         attron(COLOR_PAIR(1));
         printw("DES2 ");
-        attron(COLOR_PAIR(3));
+        attron(COLOR_PAIR(carrier_color));
       }
       if (state->payload_algidR == 0x83)
       {
         attron(COLOR_PAIR(1));
         printw("DES3 ");
-        attron(COLOR_PAIR(3));
+        attron(COLOR_PAIR(carrier_color));
       }
       if (state->payload_algidR == 0x89 || state->payload_algidR == 0x24)
       {
         attron(COLOR_PAIR(1));
         printw("AES-128 ");
         if (state->aes_key_loaded[1] != 0) { printw("KS: %016llX ", state->A2[1]); }
-        attron(COLOR_PAIR(3));
+        attron(COLOR_PAIR(carrier_color));
       }
       if (state->payload_algidR == 0x84 || state->payload_algidR == 0x25 || state->payload_algidR == 0x05)
       {
         attron(COLOR_PAIR(1));
         printw("AES-256 ");
         if (state->aes_key_loaded[1] != 0) { printw("KS: %016llX ", state->A4[1]); }
-        attron(COLOR_PAIR(3));
+        attron(COLOR_PAIR(carrier_color));
       }
       if (state->payload_algidR == 0x26)
       {
         attron(COLOR_PAIR(1));
         printw("Caltta BP ");
         // if (state->aes_key_loaded[1] != 0) { printw("KS: %016llX ", state->A4[1]); } //TODO: This
-        attron(COLOR_PAIR(3));
+        attron(COLOR_PAIR(carrier_color));
       }
       if (state->payload_algidR == 0x02)
       {
@@ -1314,14 +1583,14 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
         printw("Hytera Enhanced");
         if (state->RR != 0)
           printw(" Key: %010llX", state->RR);
-        attron(COLOR_PAIR(3));
+        attron(COLOR_PAIR(carrier_color));
       }
       if (state->payload_algidR >= 0x31 && state->payload_algidR <= 0x3A)
       {
         attron(COLOR_PAIR(1));
         printw("Kirisun Advanced ");
         if (state->aes_key_loaded[1] != 0) { printw("KS: %016llX ", state->A4[1]); }
-        attron(COLOR_PAIR(3));
+        attron(COLOR_PAIR(carrier_color));
       }
 
       printw ("\n");
@@ -1331,12 +1600,13 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
 
       attron(COLOR_PAIR(4));
 
-      if(state->dmrburstR == 16 || state->dmrburstR == 21) //only during call
+      if(state->dmrburstR == 16 || state->dmrburstR == 2 || state->dmrburstR == 21) //during call and DMR TLC
       {
 
         //Embedded GPS (not LRRP)
         attron(COLOR_PAIR(4));
-        printw  ("%s ", state->dmr_embedded_gps[1]);
+        if (state->dmrburstR != 2 && state->dmr_embedded_gps[1][0] != 0)
+          printw  ("%s ", state->dmr_embedded_gps[1]);
 
         //Embedded Talker Alias String
         printw ("%s ", state->generic_talker_alias[1]);
@@ -1344,7 +1614,7 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
         attroff(COLOR_PAIR(5));
         if (state->carrier == 1)
         {
-          attron(COLOR_PAIR(3));
+          attron(COLOR_PAIR(carrier_color));
         }
 
       }
@@ -1369,12 +1639,12 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
           }
           if (state->carrier == 1)
           {
-            attron(COLOR_PAIR(3));
+            attron(COLOR_PAIR(carrier_color));
           }
         }
       }
 
-      if (state->carrier == 1) attron(COLOR_PAIR(3));
+      if (state->carrier == 1) attron(COLOR_PAIR(carrier_color));
       else attroff(COLOR_PAIR(4));
 
       printw ("\n");
@@ -1390,7 +1660,7 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
           if (state->active_channel[i] != 0) printw ("%s", state->active_channel[i]);
         }
 
-        if (state->carrier == 1) attron(COLOR_PAIR(3));
+        if (state->carrier == 1) attron(COLOR_PAIR(carrier_color));
         else attroff(COLOR_PAIR(4));
         printw ("\n");
       }
@@ -1399,17 +1669,28 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
       {
         printw ("|        | "); //Currently Tuned Frequency
 
-        // Tuned Frequency Display
-        if (state->p25_vc_freq[0] != 0)
+        // Tuned Frequency and Channel (Cap+/XPT LSN, TIII LPCN, Con+ LCN) Display
+        if (opts->p25_trunk == 1)
         {
-          attron(COLOR_PAIR(4));
-          printw ("Frequency: %.06lf MHz  ", (double)state->p25_vc_freq[0]/1000000);
+          long int cur_freq = trunk_get_current_freq(opts, state);
+          char chan_str[32];
+          trunk_get_dmr_channel_str(opts, state, cur_freq, chan_str, sizeof(chan_str));
+          if (cur_freq != 0 || chan_str[0] != '\0')
+          {
+            attron(COLOR_PAIR(4));
+            if (cur_freq != 0 && chan_str[0] != '\0')
+              printw ("Freq: %.06lf MHz; %s  ", (double)cur_freq/1000000, chan_str);
+            else if (cur_freq != 0)
+              printw ("Freq: %.06lf MHz  ", (double)cur_freq/1000000);
+            else
+              printw ("%s  ", chan_str);
+          }
         }
 
         //TG Hold, if specified by user
         if (state->tg_hold != 0) printw ("TG HOLD: %d", state->tg_hold);
 
-        if (state->carrier == 1) attron(COLOR_PAIR(3));
+        if (state->carrier == 1) attron(COLOR_PAIR(carrier_color));
         else attroff(COLOR_PAIR(4));
         printw ("\n");
       }
@@ -1627,18 +1908,36 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
   //colors off
   if (state->carrier == 1){ //same as above
     attroff(COLOR_PAIR(3));
+    attroff(COLOR_PAIR(6));
   }
   //only print event history if enabled
   attron(COLOR_PAIR(4)); //cyan for history
-  printw ("--Latest Event History ([|])---Slot %d (\\)---Cycle (h)-Short/Long/Off----------\n", state->eh_slot+1);
+  if (state->eh_slot == 0)
+    printw ("--Latest Event History ([|])----All (\\)-----Cycle (h)-Short/Long/Off----------\n");
+  else
+    printw ("--Latest Event History ([|])---Slot %d (\\)---Cycle (h)-Short/Long/Off----------\n", state->eh_slot);
   if (opts->ncurses_history != 0)
   {
-    for (uint16_t i = (state->eh_index+1); i < (state->eh_index+11); i++)
+    uint8_t idx0 = 1, idx1 = 1;
+    for (uint16_t step = 1; step < (state->eh_index+11); step++)
     {
       uint16_t string_size = 71; //short uniform size that doesn't exceed the fence
       if (opts->ncurses_history == 2)
         string_size = 1999; //full string size
-      uint8_t slot = state->eh_slot;
+      uint8_t slot = (state->eh_slot > 0) ? (state->eh_slot - 1) : 0;
+      uint16_t i = step;
+      if (state->eh_slot == 0)
+      {
+        char * s0 = state->event_history_s[0].Event_History_Items[idx0].event_string;
+        char * s1 = state->event_history_s[1].Event_History_Items[idx1].event_string;
+        uint8_t v0 = (idx0 < 255 && strncmp("BUMBLEBEETUNA", s0, 13) != 0);
+        uint8_t v1 = (idx1 < 255 && strncmp("BUMBLEBEETUNA", s1, 13) != 0);
+        if (v0 && (!v1 || strncmp(s0, s1, 19) >= 0)) { slot = 0; i = idx0++; }
+        else if (v1) { slot = 1; i = idx1++; }
+        else { slot = 0; i = (idx0 < 255) ? idx0 : 254; }
+      }
+      if (step <= state->eh_index)
+        continue;
       uint8_t color_pair = state->event_history_s[slot].Event_History_Items[i%255].color_pair; //this is the color pair assignment for this line
       attron(COLOR_PAIR(4));
 
@@ -1648,20 +1947,80 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
       {
         memcpy(text_string, state->event_history_s[slot].Event_History_Items[i%255].event_string, string_size*sizeof(char));
         text_string[string_size] = 0; //terminate string
-        printw ("| #%03d ", i%255);
+        printw ("| #%03d ", step%255);
         attron(COLOR_PAIR(color_pair)); //this is where the custom color switch occurs for the event_string
-        printw ("%s\n", text_string);
+        if (opts->ncurses_history == 2)
+        {
+          const char *p = text_string;
+          int first_line = 1;
+          while (*p != '\0')
+          {
+            while (!first_line && *p == ' ')
+              p++;
+            if (*p == '\0')
+              break;
+            size_t rem = strlen(p);
+            size_t chunk = (rem <= 71) ? rem : 71;
+            if (rem > 71)
+            {
+              size_t sp = 71;
+              while (sp > 20 && p[sp] != ' ')
+                sp--;
+              if (p[sp] == ' ')
+                chunk = sp;
+            }
+            if (!first_line)
+            {
+              attron(COLOR_PAIR(4));
+              printw ("|      ");
+              attron(COLOR_PAIR(color_pair));
+            }
+            printw ("%.*s\n", (int)chunk, p);
+            p += chunk;
+            first_line = 0;
+          }
+          if (first_line)
+            printw ("\n");
+        }
+        else
+        {
+          printw ("%s\n", text_string);
+        }
         attron(COLOR_PAIR(4));
       }
-      else printw ("| #%03d \n", i%255); //empty event, but since we can freely scroll now, keeps things uniform
+      else printw ("| #%03d \n", step%255); //empty event, but since we can freely scroll now, keeps things uniform
 
       sprintf (text_string, "%s", "BUMBLEBEETUNA");
       if (strncmp(text_string, state->event_history_s[slot].Event_History_Items[i%255].text_message, 13) != 0)
       {
-        printw ("|");
-        attron(COLOR_PAIR(4)); //feel free to change this to any value you want
-        printw ("      %s\n", state->event_history_s[slot].Event_History_Items[i%255].text_message);
         attron(COLOR_PAIR(4));
+        if (opts->ncurses_history == 2)
+        {
+          const char *tm = state->event_history_s[slot].Event_History_Items[i%255].text_message;
+          while (*tm != '\0')
+          {
+            while (*tm == ' ')
+              tm++;
+            if (*tm == '\0')
+              break;
+            size_t rem = strlen(tm);
+            size_t chunk = (rem <= 71) ? rem : 71;
+            if (rem > 71)
+            {
+              size_t sp = 71;
+              while (sp > 20 && tm[sp] != ' ')
+                sp--;
+              if (tm[sp] == ' ')
+                chunk = sp;
+            }
+            printw ("|      %.*s\n", (int)chunk, tm);
+            tm += chunk;
+          }
+        }
+        else
+        {
+          printw ("|      %.71s\n", state->event_history_s[slot].Event_History_Items[i%255].text_message);
+        }
       }
 
       if (strncmp(text_string, state->event_history_s[slot].Event_History_Items[i%255].alias, 13) != 0)
@@ -1676,7 +2035,7 @@ ncursesPrinter (dsd_opts * opts, dsd_state * state)
       {
         printw ("|");
         attron(COLOR_PAIR(4)); //feel free to change this to any value you want
-        printw ("      GPS: %s \n", state->event_history_s[slot].Event_History_Items[i%255].gps_s);
+        printw ("      GPS: %.66s\n", state->event_history_s[slot].Event_History_Items[i%255].gps_s);
         attron(COLOR_PAIR(4));
       }
 
