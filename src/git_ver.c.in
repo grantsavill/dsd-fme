@@ -1,2 +1,175 @@
 #define _GIT_TAG "@GIT_TAG@"
 const char GIT_TAG[] = _GIT_TAG;
+static const char GIT_UPSTREAM_SHA[] = "@GIT_UPSTREAM_SHA@";
+static const char GIT_HEAD_SHA[] = "@GIT_HEAD_SHA@";
+
+#include <ctype.h>
+#include <pthread.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#if defined(_WIN32) || defined(__CYGWIN__)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
+
+static volatile int g_upstream_out_of_sync = 0;
+static int g_upstream_check_started = 0;
+
+static int parse_audio_work_sha(const char *buf, size_t len, char sha_out[41])
+{
+    static const char refname[] = "refs/heads/audio_work";
+    const size_t reflen = sizeof(refname) - 1U;
+    if (buf == NULL || len < 41U + reflen)
+        return 0;
+
+    for (size_t i = 41U; i + reflen <= len; i++)
+    {
+        if (buf[i] == 'r' && buf[i - 1] == ' ' && memcmp(buf + i, refname, reflen) == 0)
+        {
+            size_t after = i + reflen;
+            if (after == len || buf[after] == '\n' || buf[after] == '\r' || buf[after] == '\0')
+            {
+                int valid = 1;
+                for (size_t k = 0; k < 40U; k++)
+                {
+                    if (!isxdigit((unsigned char)buf[i - 41U + k]))
+                    {
+                        valid = 0;
+                        break;
+                    }
+                }
+                if (valid)
+                {
+                    for (size_t k = 0; k < 40U; k++)
+                        sha_out[k] = (char)tolower((unsigned char)buf[i - 41U + k]);
+                    sha_out[40] = '\0';
+                    return 1;
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+static int fetch_upstream_audio_work_sha(char sha_out[41])
+{
+    static const char kUrl[] =
+        "https://github.com/lwvmobile/dsd-fme.git/info/refs?service=git-upload-pack";
+    const size_t maxBuf = 131072U;
+    char *buf = (char *)malloc(maxBuf);
+    if (buf == NULL)
+        return 0;
+
+    size_t total = 0;
+#if defined(_WIN32) || defined(__CYGWIN__)
+    typedef LPVOID HINTERNET;
+    typedef HINTERNET (WINAPI *FnInternetOpenA)(LPCSTR, DWORD, LPCSTR, LPCSTR, DWORD);
+    typedef HINTERNET (WINAPI *FnInternetOpenUrlA)(HINTERNET, LPCSTR, LPCSTR, DWORD, DWORD, DWORD_PTR);
+    typedef BOOL (WINAPI *FnInternetReadFile)(HINTERNET, LPVOID, DWORD, LPDWORD);
+    typedef BOOL (WINAPI *FnInternetCloseHandle)(HINTERNET);
+    typedef BOOL (WINAPI *FnInternetSetOptionA)(HINTERNET, DWORD, LPVOID, DWORD);
+
+    HMODULE hWinInet = LoadLibraryA("wininet.dll");
+    if (hWinInet != NULL)
+    {
+        FnInternetOpenA pOpen = (FnInternetOpenA)GetProcAddress(hWinInet, "InternetOpenA");
+        FnInternetOpenUrlA pOpenUrl = (FnInternetOpenUrlA)GetProcAddress(hWinInet, "InternetOpenUrlA");
+        FnInternetReadFile pReadFile = (FnInternetReadFile)GetProcAddress(hWinInet, "InternetReadFile");
+        FnInternetCloseHandle pCloseHandle = (FnInternetCloseHandle)GetProcAddress(hWinInet, "InternetCloseHandle");
+        FnInternetSetOptionA pSetOption = (FnInternetSetOptionA)GetProcAddress(hWinInet, "InternetSetOptionA");
+
+        if (pOpen != NULL && pOpenUrl != NULL && pReadFile != NULL && pCloseHandle != NULL)
+        {
+            HINTERNET hSession = pOpen("dsd-fme/1.0", 0UL, NULL, NULL, 0UL);
+            if (hSession != NULL)
+            {
+                if (pSetOption != NULL)
+                {
+                    DWORD timeoutMs = 5000UL;
+                    pSetOption(hSession, 2UL /*INTERNET_OPTION_CONNECT_TIMEOUT*/, &timeoutMs, sizeof(timeoutMs));
+                    pSetOption(hSession, 6UL /*INTERNET_OPTION_RECEIVE_TIMEOUT*/, &timeoutMs, sizeof(timeoutMs));
+                }
+                // RELOAD (0x80000000) | NO_CACHE_WRITE (0x04000000) | SECURE (0x00800000) | PRAGMA_NOCACHE (0x00000100)
+                DWORD flags = 0x84800100UL;
+                HINTERNET hUrl = pOpenUrl(hSession, kUrl, NULL, 0UL, flags, 0);
+                if (hUrl != NULL)
+                {
+                    DWORD nread = 0;
+                    while (total + 1U < maxBuf &&
+                           pReadFile(hUrl, buf + total, (DWORD)(maxBuf - 1U - total), &nread) &&
+                           nread > 0)
+                    {
+                        total += (size_t)nread;
+                    }
+                    pCloseHandle(hUrl);
+                }
+                pCloseHandle(hSession);
+            }
+        }
+        FreeLibrary(hWinInet);
+    }
+#else
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd),
+             "curl -fsSLm 5 '%s' 2>/dev/null || wget -qO- -T 5 '%s' 2>/dev/null",
+             kUrl, kUrl);
+    FILE *fp = popen(cmd, "r");
+    if (fp != NULL)
+    {
+        while (total + 1U < maxBuf)
+        {
+            size_t n = fread(buf + total, 1U, maxBuf - 1U - total, fp);
+            if (n == 0U)
+                break;
+            total += n;
+        }
+        pclose(fp);
+    }
+#endif
+
+    int found = 0;
+    if (total > 0U)
+    {
+        buf[total] = '\0';
+        found = parse_audio_work_sha(buf, total, sha_out);
+    }
+    free(buf);
+    return found;
+}
+
+static void *upstream_sync_thread(void *arg)
+{
+    (void)arg;
+    if (GIT_UPSTREAM_SHA[0] == '\0' && GIT_HEAD_SHA[0] == '\0')
+        return NULL;
+
+    char remote_sha[41] = {0};
+    if (!fetch_upstream_audio_work_sha(remote_sha))
+        return NULL;
+
+    int matchUpstream = (GIT_UPSTREAM_SHA[0] != '\0' && strcmp(remote_sha, GIT_UPSTREAM_SHA) == 0);
+    int matchHead = (GIT_HEAD_SHA[0] != '\0' && strcmp(remote_sha, GIT_HEAD_SHA) == 0);
+    if (!matchUpstream && !matchHead)
+        g_upstream_out_of_sync = 1;
+
+    return NULL;
+}
+
+void git_start_upstream_check(void)
+{
+    if (g_upstream_check_started)
+        return;
+    g_upstream_check_started = 1;
+    pthread_t tid;
+    if (pthread_create(&tid, NULL, upstream_sync_thread, NULL) == 0)
+        pthread_detach(tid);
+}
+
+int git_is_upstream_out_of_sync(void)
+{
+    return g_upstream_out_of_sync;
+}

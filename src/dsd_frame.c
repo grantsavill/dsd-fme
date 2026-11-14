@@ -79,6 +79,20 @@ processFrame (dsd_opts * opts, dsd_state * state)
     }
 
   //NXDN FSW
+  if ((state->synctype == 41) || (state->synctype == 42))
+  {
+    sprintf (state->fsubtype, " DATA         ");
+    processTetra (opts, state);
+    return;
+  }
+
+  if (state->synctype == 44)
+  {
+    sprintf (state->fsubtype, " PACKET       ");
+    processAPRS (opts, state);
+    return;
+  }
+
   if ((state->synctype == 28) || (state->synctype == 29))
   {
     //MBEout restored, is not handled internally by nxdn_frame.c
@@ -391,7 +405,8 @@ processFrame (dsd_opts * opts, dsd_state * state)
               // NAC fixed by error correction
               state->nac = new_nac;
               //apparently, both 0 and 0xFFF can the BCH code on signal drop
-              if (state->p2_hardset == 0 && new_nac != 0 && new_nac != 0xFFF)
+              if (state->p2_hardset == 0 && new_nac != 0 && new_nac != 0xFFF &&
+                  (opts->p25_nac_filter < 0 || opts->p25_nac_filter > 0xFFF || new_nac == opts->p25_nac_filter))
               {
                 state->p2_cc = new_nac;
               }
@@ -410,6 +425,27 @@ processFrame (dsd_opts * opts, dsd_state * state)
           duid[0] = 'E';
           duid[1] = 'E';
           state->debug_header_critical_errors++;
+      }
+
+      //P25 NAC Filter: ignore non-matching NACs
+      if (check_result && opts->p25_nac_filter >= 0 && opts->p25_nac_filter <= 0xFFF &&
+          state->nac != opts->p25_nac_filter)
+      {
+          if (opts->errorbars == 1)
+          {
+              printFrameInfo (opts, state);
+              fprintf (stderr, " [NAC FILTER: %03X]\n", opts->p25_nac_filter);
+          }
+          memset (state->audio_out_temp_buf, 0, sizeof(state->audio_out_temp_buf));
+          memset (state->s_l, 0, sizeof(state->s_l));
+          memset (state->s_lu, 0, sizeof(state->s_lu));
+          state->lastp25type = 0;
+          sprintf (state->fsubtype, "              ");
+          return;
+      }
+      if (check_result)
+      {
+          state->last_cc_sync_time = time(NULL);
       }
     }
 
@@ -534,6 +570,7 @@ processFrame (dsd_opts * opts, dsd_state * state)
       mbe_initMbeParms (state->cur_mp, state->prev_mp, state->prev_mp_enhanced);
       state->lasttg = 0;
       state->lastsrc = 0;
+      ambe_hw_reset_call(0);
       state->lastp25type = 0;
       state->err_str[0] = 0;
       sprintf (state->fsubtype, " TDU          ");
@@ -559,6 +596,7 @@ processFrame (dsd_opts * opts, dsd_state * state)
       }
       state->lasttg = 0;
       state->lastsrc = 0;
+      ambe_hw_reset_call(0);
       state->lastp25type = 3;
       sprintf (state->fsubtype, " TSBK         ");
 

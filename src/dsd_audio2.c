@@ -236,6 +236,9 @@ void playSynthesizedVoiceFS3 (dsd_opts * opts, dsd_state * state)
   agf (opts, state, state->f_l4[2],0);
   agf (opts, state, state->f_r4[2],1);
 
+  if (ambe_hw_was_frame_muted(0)) encL = 1;
+  if (ambe_hw_was_frame_muted(1)) encR = 1;
+
   //interleave left and right channels from the temp (float) buffer with makeshift 'volume' decimation
   for (i = 0; i < 160; i++)
   {
@@ -477,6 +480,9 @@ void playSynthesizedVoiceFS4 (dsd_opts * opts, dsd_state * state)
   agf (opts, state, state->f_r4[3],1);
   agf (opts, state, empty,2); //running empty may invalidate the memcmp, ideally both this empty and an empty f_ should come out with the same result anyways
 
+  if (ambe_hw_was_frame_muted(0)) encL = 1;
+  if (ambe_hw_was_frame_muted(1)) encR = 1;
+
   //interleave left and right channels from the temp (float) buffer with makeshift 'volume' decimation
   for (i = 0; i < 160; i++)
   {
@@ -658,7 +664,7 @@ void playSynthesizedVoiceFS (dsd_opts * opts, dsd_state * state)
   agf (opts, state, state->f_l,0);
 
   //at this point, if both channels are still flagged as enc, then we can skip all playback/writing functions
-  if (encL)
+  if (encL || ambe_hw_was_frame_muted(0))
     goto FS_END;
 
   //interleave left and right channels from the temp (float) buffer with makeshift 'volume' decimation
@@ -720,6 +726,8 @@ void playSynthesizedVoiceFS (dsd_opts * opts, dsd_state * state)
 
 void playSynthesizedVoiceFM (dsd_opts * opts, dsd_state * state)
 {
+  if (ambe_hw_was_frame_muted(0))
+    goto vfm_end;
 
   agf(opts, state, state->f_l,0);
 
@@ -848,10 +856,10 @@ void playSynthesizedVoiceMS (dsd_opts * opts, dsd_state * state)
   //debug
   // fprintf (stderr, " L LEN: %d", len);
 
-  short mono_samp[len];
-  memset (mono_samp, 0, len*sizeof(short));
+  short mono_samp[len > 0 ? len : 1];
+  memset (mono_samp, 0, sizeof(mono_samp));
 
-  if (opts->slot1_on == 0)
+  if (len == 0 || opts->slot1_on == 0 || ambe_hw_was_frame_muted(0))
     goto MS_END;
 
   if (len == 160)
@@ -934,10 +942,10 @@ void playSynthesizedVoiceMSR (dsd_opts * opts, dsd_state * state)
   //debug
   // fprintf (stderr, " R LEN: %d", len);
 
-  short mono_samp[len];
-  memset (mono_samp, 0, len*sizeof(short));
+  short mono_samp[len > 0 ? len : 1];
+  memset (mono_samp, 0, sizeof(mono_samp));
 
-  if (opts->slot2_on == 0)
+  if (len == 0 || opts->slot2_on == 0 || ambe_hw_was_frame_muted(1))
     goto MS_ENDR;
 
   if (len == 160)
@@ -1099,7 +1107,7 @@ void playSynthesizedVoiceSS (dsd_opts * opts, dsd_state * state)
   }
 
   //at this point, if still flagged as enc, then we can skip all playback/writing functions
-  if (encL)
+  if (encL || ambe_hw_was_frame_muted(0))
     goto SSM_END;
 
   if (opts->audio_out_type == 0) //Pulse Audio
@@ -1363,7 +1371,7 @@ void playSynthesizedVoiceSS3 (dsd_opts * opts, dsd_state * state)
   }
   else //otherwise, reset slot preference to either or (both slots enabled)
   {
-    opts->slot_preference = 2;
+    if (state->tg_hold != 0) opts->slot_preference = 2;
   }
 
   //test hpf
@@ -1382,6 +1390,8 @@ void playSynthesizedVoiceSS3 (dsd_opts * opts, dsd_state * state)
   #define DMR_STEREO_OUTPUT
 
   #ifdef DMR_STEREO_OUTPUT
+  if (ambe_hw_was_frame_muted(0)) encL = 1;
+  if (ambe_hw_was_frame_muted(1)) encR = 1;
   if (encL) memset (state->s_l4, 0, sizeof(state->s_l4));
   if (encR) memset (state->s_r4, 0, sizeof(state->s_r4));
   //this is for playing single voice over both channels, or when to keep them seperated
@@ -1690,6 +1700,9 @@ void playSynthesizedVoiceSS4 (dsd_opts * opts, dsd_state * state)
       hpf_dR(state, state->s_r4[3], 160);
   }
 
+  if (ambe_hw_was_frame_muted(0)) encL = 1;
+  if (ambe_hw_was_frame_muted(1)) encR = 1;
+
   //interleave left and right channels from the short storage area
   for (i = 0; i < 160; i++)
   {
@@ -1971,7 +1984,7 @@ void playSynthesizedVoiceSS18 (dsd_opts * opts, dsd_state * state)
   }
   else //otherwise, reset slot preference to either or (both slots enabled)
   {
-    opts->slot_preference = 2;
+    if (state->tg_hold != 0) opts->slot_preference = 2;
   }
 
   //run hpf_d filter, if enabled
@@ -1988,6 +2001,8 @@ void playSynthesizedVoiceSS18 (dsd_opts * opts, dsd_state * state)
   #define P2_STEREO_OUTPUT
 
   #ifdef P2_STEREO_OUTPUT
+  if (ambe_hw_was_frame_muted(0)) encL = 1;
+  if (ambe_hw_was_frame_muted(1)) encR = 1;
   if (encL) memset (state->s_l4, 0, sizeof(state->s_l4));
   if (encR) memset (state->s_r4, 0, sizeof(state->s_r4));
   //this is for playing single voice over both channels, or when to keep them seperated
@@ -2153,6 +2168,22 @@ void agf (dsd_opts * opts, dsd_state * state, float samp[160], int slot)
   run = 1;
   float empty[160];
   memset (empty, 0.0f, sizeof(empty));
+
+  if (ambe_hw_is_slot_hw_decoded(slot))
+  {
+    float hw_gain = (opts->audio_gain > 0) ? (opts->audio_gain / 25.0f) : 1.0f;
+    if (slot == 0)
+      state->aout_gain = (opts->audio_gain > 0) ? opts->audio_gain : 25.0f;
+    else
+      state->aout_gainR = (opts->audio_gain > 0) ? opts->audio_gain : 25.0f;
+    for (i = 0; i < 160; i++)
+    {
+      samp[i] = ((samp[i] * 25.0f) / 32768.0f) * hw_gain;
+      if (samp[i] > 1.0f) samp[i] = 1.0f;
+      if (samp[i] < -1.0f) samp[i] = -1.0f;
+    }
+    return;
+  }
 
   float mmax = 0.90f;
   float mmin = -0.90f;

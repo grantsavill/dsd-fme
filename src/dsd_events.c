@@ -82,7 +82,7 @@ void push_event_history (Event_History_I * event_struct)
     sprintf (event_struct->Event_History_Items[i].t_mode, "%s", event_struct->Event_History_Items[i-1].t_mode);
     sprintf (event_struct->Event_History_Items[i].s_mode, "%s", event_struct->Event_History_Items[i-1].s_mode);
     event_struct->Event_History_Items[i].channel = event_struct->Event_History_Items[i-1].channel;
-    event_struct->Event_History_Items[i].event_time = event_struct->Event_History_Items[i+1].event_time;
+    event_struct->Event_History_Items[i].event_time = event_struct->Event_History_Items[i-1].event_time;
 
     memcpy  (event_struct->Event_History_Items[i].pdu, event_struct->Event_History_Items[i-1].pdu, sizeof(event_struct->Event_History_Items[0].pdu));
     sprintf (event_struct->Event_History_Items[i].sysid_string, "%s", event_struct->Event_History_Items[i-1].sysid_string);
@@ -442,6 +442,16 @@ void watchdog_event_current (dsd_opts * opts, dsd_state * state, uint8_t slot)
       sprintf (sysid_string, "M17_CAN_%d", sys_id1);
       sprintf (src_str, "%s", state->m17_src_csd);
       sprintf (tgt_str, "%s", state->m17_dst_csd);
+    }
+
+    if (state->lastsynctype == 41 || state->lastsynctype == 42) //TETRA
+    {
+      sys_id1 = state->tetra_mcc;
+      sys_id2 = state->tetra_mnc;
+      sys_id3 = state->tetra_colour_code;
+      enc = state->tetra_enc;
+      alg_id = state->tetra_enc_alg;
+      sprintf (sysid_string, "TETRA_%03u_%04u_CC_%02u", sys_id1, sys_id2, sys_id3);
     }
 
     if (state->lastsynctype == 6 || state->lastsynctype == 7 || state->lastsynctype == 18 || state->lastsynctype == 19) //DSTAR
@@ -811,7 +821,7 @@ void watchdog_event_current (dsd_opts * opts, dsd_state * state, uint8_t slot)
     strcat (event_string, private);
   }
 
-  sprintf (event_struct->Event_History_Items[0].event_string, "%s", event_string);
+  if (source_id != 0) sprintf (event_struct->Event_History_Items[0].event_string, "%s", event_string);
 
   if (timestr != NULL)
   {

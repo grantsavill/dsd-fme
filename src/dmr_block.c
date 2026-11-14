@@ -544,7 +544,11 @@ void dmr_dheader (dsd_opts * opts, dsd_state * state, uint8_t dheader[], uint8_t
     //3 or 4 seems to be the average safe value
     if (state->data_header_blocks[slot] < 1) state->data_header_blocks[slot] = 1; //
     //set data header validity unless its a p_head (should be set prior, if received)
-    if (dpf != 15) state->data_header_valid[slot] = 1;
+    if (dpf != 15)
+    {
+      state->data_header_valid[slot] = 1;
+      dmr_talker_alias_reset(state, slot);
+    }
 
     if (dpf != 1 && dpf != 15)
     {

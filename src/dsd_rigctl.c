@@ -12,6 +12,7 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <netdb.h>
 
 //UDP Specific
@@ -74,6 +75,9 @@ int Connect (char *hostname, int portno)
         return (0);
     }
 
+    int nodelay = 1;
+    setsockopt(sockfd, IPPROTO_TCP, TCP_NODELAY, (const void *)&nodelay, sizeof(nodelay));
+
     return sockfd;
 }
 //
@@ -133,6 +137,8 @@ bool SetFreq(int sockfd, long int freq)
     sprintf (buf, "F %ld\n", freq);
     Send(sockfd, buf);
     Recv(sockfd, buf);
+
+    trunk_update_filter_for_freq(freq);
 
     if (strcmp(buf, "RPRT 1\n") == 0 ) //sdr++ has a linebreak here, is that in all versions of the protocol?
         return false;
@@ -436,6 +442,8 @@ void return_to_cc (dsd_opts * opts, dsd_state * state)
     state->lasttgR = 0;
     state->lastsrc = 0;
     state->lastsrcR = 0;
+    ambe_hw_reset_call(0);
+    ambe_hw_reset_call(1);
     state->gi[0] = -1;
     state->gi[1] = -1;
     state->payload_algid = 0;

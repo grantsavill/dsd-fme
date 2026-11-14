@@ -1,5 +1,5 @@
-ChannelNumber(dec),frequency(Hz) (do not delete this line or won't import properly)
-999,862093750,default cc (come here first), optional use non-existent channel as first entry
+ChannelNumber(dec),frequency(Hz),cc(optional) (do not delete this line or won't import properly)
+999,862093750,,default cc (come here first), optional use non-existent channel as first entry
 1,863093750
 2,862093750
 3,861093750
