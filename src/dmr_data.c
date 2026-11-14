@@ -33,6 +33,7 @@ dmr_data_sync (dsd_opts * opts, dsd_state * state)
   unsigned char SlotType[20];
   unsigned int SlotTypeOk;
   uint8_t cach_err = 0;
+  int cc_filtered = 0;
   UNUSED(cach_err);
 
   int cachInterleave[24] =
@@ -81,7 +82,15 @@ dmr_data_sync (dsd_opts * opts, dsd_state * state)
     goto END;
   }
 
-  state->currentslot = tact_bits[1];
+  int cach_slot_mismatch = (state->dmr_stereo == 1 && tact_bits[1] != state->currentslot);
+  if (state->dmr_stereo == 0)
+  {
+    state->currentslot = tact_bits[1];
+  }
+  if (cach_slot_mismatch)
+  {
+    state->dmr_cach_counter = 0;
+  }
 
   //in the future, maybe we will remove the hard set on this
   if (state->dmr_ms_mode == 1)
@@ -232,11 +241,6 @@ dmr_data_sync (dsd_opts * opts, dsd_state * state)
     sprintf(state->slot2light, "[sLoT2]");
   }
 
-  if (state->dmr_ms_mode == 0)
-  {
-    fprintf(stderr, "%s %s ", state->slot1light, state->slot2light);
-  }
-
   // Slot type - Second part - Parity bit
   for (i = 0; i < 5; i++)
   {
@@ -260,19 +264,114 @@ dmr_data_sync (dsd_opts * opts, dsd_state * state)
   else
   {
     SlotTypeOk = 0;
+    state->color_code_ok = 0;
     goto END;
   }
 
-  state->color_code = (SlotType[0] << 3) + (SlotType[1] << 2) +(SlotType[2] << 1) + (SlotType[3] << 0);
-  state->color_code_ok = SlotTypeOk;
+  unsigned int decoded_cc = (SlotType[0] << 3) + (SlotType[1] << 2) + (SlotType[2] << 1) + (SlotType[3] << 0);
 
-  //not sure why I still have two variables for this, need to look and see what state->color_code still ties into
-  if (SlotTypeOk == 1) state->dmr_color_code = state->color_code;
+  if (opts->dmr_cc_filter >= 0 && opts->dmr_cc_filter <= 15 && (int)decoded_cc != opts->dmr_cc_filter)
+  {
+    trunk_check_rigctl_freq(opts, state);
+  }
+
+  if (opts->dmr_cc_filter >= 0 && opts->dmr_cc_filter <= 15 && (int)decoded_cc != opts->dmr_cc_filter)
+  {
+    cc_filtered = 1;
+    if (state->dmr_unconfirmed_sync == 1)
+    {
+      state->last_cc_sync_time = state->dmr_unconfirmed_cc_sync_time;
+      state->last_vc_sync_time = state->dmr_unconfirmed_vc_sync_time;
+      state->dmr_unconfirmed_sync = 0;
+    }
+    if (state->currentslot == 0)
+    {
+      if (state->dmrburstL == 16) state->dmrburstL = 17;
+      if (opts->mbe_out_f != NULL) closeMbeOutFile (opts, state);
+      memset (state->f_l4, 0, sizeof(state->f_l4));
+      memset (state->s_l4, 0, sizeof(state->s_l4));
+      memset (state->s_l4u, 0, sizeof(state->s_l4u));
+    }
+    else
+    {
+      if (state->dmrburstR == 16) state->dmrburstR = 17;
+      if (opts->mbe_out_fR != NULL) closeMbeOutFileR (opts, state);
+      memset (state->f_r4, 0, sizeof(state->f_r4));
+      memset (state->s_r4, 0, sizeof(state->s_r4));
+      memset (state->s_r4u, 0, sizeof(state->s_r4u));
+    }
+    state->dmr_cach_counter = 0;
+    if (trunk_is_stale_retune_burst((int)decoded_cc))
+    {
+      goto END;
+    }
+    state->color_code = decoded_cc;
+    if (state->dmr_color_code != (unsigned int)opts->dmr_cc_filter)
+      state->dmr_color_code = decoded_cc;
+    state->color_code_ok = 1;
+    {
+      char * timestr = getTimeC();
+      if (state->dmr_ms_mode == 0)
+        fprintf (stderr, "%s Sync: %sDMR  %s %s ", timestr, (opts->inverted_dmr == 0) ? "+" : "-", state->slot1light, state->slot2light);
+      else
+        fprintf (stderr, "%s Sync: %sDMR MS/DM MODE/MONO ", timestr, (opts->inverted_dmr == 0) ? "+" : "-");
+      if (timestr != NULL)
+      {
+        free (timestr);
+        timestr = NULL;
+      }
+    }
+    fprintf (stderr, "| Color Code=%02d [CC FILTER: %02d]\n", state->color_code, opts->dmr_cc_filter);
+    goto END;
+  }
+
+  (void)trunk_is_stale_retune_burst((int)decoded_cc);
+  state->color_code = decoded_cc;
+  state->dmr_color_code = decoded_cc;
+  state->color_code_ok = 1;
+  {
+    char * timestr = getTimeC();
+    if (state->dmr_ms_mode == 0)
+      fprintf (stderr, "%s Sync: %sDMR  %s %s ", timestr, (opts->inverted_dmr == 0) ? "+" : "-", state->slot1light, state->slot2light);
+    else
+      fprintf (stderr, "%s Sync: %sDMR MS/DM MODE/MONO ", timestr, (opts->inverted_dmr == 0) ? "+" : "-");
+    if (timestr != NULL)
+    {
+      free (timestr);
+      timestr = NULL;
+    }
+  }
+
+  state->dmr_unconfirmed_sync = 0;
+  state->last_cc_sync_time = time(NULL);
 
   /* Reconstitute the burst type */
   burst = (uint8_t)((SlotType[4] << 3) + (SlotType[5] << 2) + (SlotType[6] << 1) + SlotType[7]);
   if (state->currentslot == 0) state->dmrburstL = burst;
   if (state->currentslot == 1) state->dmrburstR = burst;
+  if (burst != 0x02 && burst != 0x03)
+    state->dmr_hangtime[state->currentslot] = 0;
+  if (burst == 0x09)
+  {
+    if (state->currentslot == 0)
+    {
+      state->lasttg = 0;
+      state->lastsrc = 0;
+      state->dmr_so = 0;
+      state->dmr_fid = 0;
+    }
+    else if (state->currentslot == 1)
+    {
+      state->lasttgR = 0;
+      state->lastsrcR = 0;
+      state->dmr_soR = 0;
+      state->dmr_fidR = 0;
+    }
+    dmr_talker_alias_reset(state, state->currentslot);
+    sprintf (state->call_string[state->currentslot], "%s", "                     "); //21 spaces
+    state->gi[state->currentslot] = -1;
+    ambe_hw_reset_call(state->currentslot);
+  }
 
 
   // Current slot - Second Half - Data Payload - 2nd part
@@ -296,8 +395,8 @@ dmr_data_sync (dsd_opts * opts, dsd_state * state)
   //
   dmr_data_burst_handler(opts, state, (uint8_t *)info, burst);
 
-  //don't run cach on simplex or mono
-  if (state->dmr_ms_mode == 0 && opts->dmr_mono == 0)
+  //don't run cach on simplex or mono, or if dmr_data_burst_handler just retuned to a new frequency
+  if (state->dmr_ms_mode == 0 && opts->dmr_mono == 0 && state->color_code_ok == 1 && !cach_slot_mismatch)
   {
     cach_err = dmr_cach (opts, state, cachdata);
   }
@@ -308,17 +407,44 @@ dmr_data_sync (dsd_opts * opts, dsd_state * state)
   END:
   if (SlotTypeOk == 0 || cach_okay != 1)
   {
-    fprintf (stderr, "%s", KRED);
-    fprintf (stderr, "| CACH/Burst FEC ERR");
-    fprintf (stderr, "%s", KNRM);
-    fprintf (stderr, "\n");
+    if (state->dmr_unconfirmed_sync == 1)
+    {
+      state->last_cc_sync_time = state->dmr_unconfirmed_cc_sync_time;
+      state->last_vc_sync_time = state->dmr_unconfirmed_vc_sync_time;
+      state->dmr_unconfirmed_sync = 0;
+    }
+    state->color_code_ok = 0;
+    if (!trunk_is_stale_retune_burst(-1))
+    {
+      char * timestr = getTimeC();
+      if (state->dmr_ms_mode == 0)
+        fprintf (stderr, "%s Sync: %sDMR  %s %s ", timestr, (opts->inverted_dmr == 0) ? "+" : "-", state->slot1light, state->slot2light);
+      else
+        fprintf (stderr, "%s Sync: %sDMR MS/DM MODE/MONO ", timestr, (opts->inverted_dmr == 0) ? "+" : "-");
+      if (timestr != NULL)
+      {
+        free (timestr);
+        timestr = NULL;
+      }
+      fprintf (stderr, "%s", KRED);
+      fprintf (stderr, "| CACH/Burst FEC ERR");
+      fprintf (stderr, "%s", KNRM);
+      fprintf (stderr, "\n");
+    }
     dmr_reset_blocks (opts, state); //failsafe to reset all data header and blocks when bad tact or slottype
   }
 
   // Skip cach (24 bit = 12 dibit) and next slot 1st half (98 + 10 bit = 49 + 5 dibit)
   if (state->dmr_stereo == 0)
   {
-    skipDibit (opts, state, 12 + 49 + 5);
+    if (opts->use_ncurses_terminal == 1)
+    {
+      ncursesPrinter(opts, state);
+    }
+    if (!cc_filtered && !(opts->dmr_cc_filter >= 0 && opts->dmr_cc_filter <= 15 && (SlotTypeOk == 0 || cach_okay != 1)))
+    {
+      skipDibit (opts, state, 12 + 49 + 5);
+    }
   }
 
   #define CON_TUNEAWAY //disable if any unlock issues noted on the logic

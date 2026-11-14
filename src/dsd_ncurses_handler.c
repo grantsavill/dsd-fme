@@ -8,6 +8,73 @@
 
 #include "dsd.h"
 
+void dsd_toggle_signal_inversion(dsd_opts * opts)
+{
+  if (opts->inverted_dmr == 0)
+  {
+    opts->inverted_dmr = 1;
+    opts->inverted_dpmr = 1;
+    opts->inverted_x2tdma = 1;
+    opts->inverted_ysf = 1;
+    opts->inverted_nxdn = 1;
+    opts->inverted_tetra = 1;
+  }
+  else
+  {
+    opts->inverted_dmr = 0;
+    opts->inverted_dpmr = 0;
+    opts->inverted_x2tdma = 0;
+    opts->inverted_ysf = 0;
+    opts->inverted_nxdn = 0;
+    opts->inverted_tetra = 0;
+  }
+}
+
+void dsd_toggle_encrypted_mute(dsd_opts * opts)
+{
+  if (opts->unmute_encrypted_p25 == 0 && opts->dmr_mute_encL == 1 && opts->reverse_mute == 0)
+  {
+    opts->unmute_encrypted_p25 = 1;
+    opts->dmr_mute_encL = 0;
+    opts->dmr_mute_encR = 0;
+    opts->reverse_mute = 1;
+  }
+  else
+  {
+    opts->unmute_encrypted_p25 = 0;
+    opts->dmr_mute_encL = 1;
+    opts->dmr_mute_encR = 1;
+    opts->reverse_mute = 0;
+  }
+}
+
+static int *dsd_get_active_cc_filter(dsd_opts * opts, dsd_state * state, int * max_val, int * cur_val)
+{
+  int lls = state->lastsynctype;
+  if (lls == 41 || lls == 42 || lls == 43 || opts->frame_tetra == 1)
+  {
+    *max_val = 63;
+    *cur_val = (state->tetra_scramb_valid && state->tetra_colour_code <= 63) ? (int)state->tetra_colour_code : -1;
+    return &opts->tetra_cc_filter;
+  }
+  if (lls == 28 || lls == 29 || ((opts->frame_nxdn48 == 1 || opts->frame_nxdn96 == 1) && opts->frame_dmr == 0 && opts->frame_p25p1 == 0 && opts->frame_p25p2 == 0))
+  {
+    *max_val = 63;
+    *cur_val = (state->nxdn_last_ran >= 0 && state->nxdn_last_ran <= 63) ? state->nxdn_last_ran : -1;
+    return &opts->nxdn_ran_filter;
+  }
+  if (lls == 0 || lls == 1 || lls == 35 || lls == 36 || ((opts->frame_p25p1 == 1 || opts->frame_p25p2 == 1) && opts->frame_dmr == 0))
+  {
+    int nac = (lls == 35 || lls == 36 || state->nac == 0) ? state->p2_cc : state->nac;
+    *max_val = 0xFFF;
+    *cur_val = (nac >= 0 && nac <= 0xFFF) ? nac : -1;
+    return &opts->p25_nac_filter;
+  }
+  *max_val = 15;
+  *cur_val = (state->dmr_color_code <= 15) ? (int)state->dmr_color_code : -1;
+  return &opts->dmr_cc_filter;
+}
+
 uint8_t ncurses_input_handler(dsd_opts * opts, dsd_state * state, int c)
 {
 
@@ -41,7 +108,7 @@ uint8_t ncurses_input_handler(dsd_opts * opts, dsd_state * state, int c)
   {
     if (state->tg_hold == 0)
       state->tg_hold = state->lasttg;
-    else state->tg_hold = 0;
+    else { state->tg_hold = 0; if (opts->audio_out_type != 5) opts->slot_preference = 2; }
 
     if ( (opts->frame_nxdn48 == 1 || opts->frame_nxdn96 == 1) && (state->tg_hold == 0) )
       state->tg_hold = state->nxdn_last_tg;
@@ -54,7 +121,34 @@ uint8_t ncurses_input_handler(dsd_opts * opts, dsd_state * state, int c)
   {
     if (state->tg_hold == 0)
       state->tg_hold = state->lasttgR;
-    else state->tg_hold = 0;
+    else { state->tg_hold = 0; if (opts->audio_out_type != 5) opts->slot_preference = 2; }
+  }
+
+  if (c == 48 || c == 46 || c == 44) //'0', '.', ',' keys: toggle or cycle active access code filter
+  {
+    int max_val = 15, cur_val = -1;
+    int *flt = dsd_get_active_cc_filter(opts, state, &max_val, &cur_val);
+    if (c == 48) //'0' key: lock on current value or clear
+    {
+      if (*flt == -1)
+      {
+        if (cur_val >= 0 && cur_val <= max_val)
+          *flt = cur_val;
+      }
+      else *flt = -1;
+    }
+    else if (c == 46) //'.' key: cycle forward (-1 -> 0..max -> -1)
+    {
+      if (*flt < max_val)
+        (*flt)++;
+      else *flt = -1;
+    }
+    else //',' key: cycle backward (-1 -> max..0 -> -1)
+    {
+      if (*flt == -1)
+        *flt = max_val;
+      else (*flt)--;
+    }
   }
 
   //toggling when 48k/1 OSS still has some lag -- needed to clear out the buffer when switching
@@ -89,8 +183,8 @@ uint8_t ncurses_input_handler(dsd_opts * opts, dsd_state * state, int c)
     //switching, but want to control each seperately plz
     if (opts->slot2_on == 1)
     {
-      opts->slot2_on = 0;
-      opts->slot_preference = 0; //slot 1
+      opts->slot2_on = 0; if (opts->slot_preference == 1) opts->slot_preference = 2;
+      // opts->slot_preference = 0; //slot 1
       //clear any previously buffered audio
       state->audio_out_float_buf_pR = state->audio_out_float_bufR + 100;
       state->audio_out_buf_pR = state->audio_out_bufR + 100;
@@ -125,7 +219,9 @@ uint8_t ncurses_input_handler(dsd_opts * opts, dsd_state * state, int c)
   if (c == 43) //+ key, increment audio_gain
   {
 
-    if (opts->audio_gain < 50)
+    if (opts->audio_gain == 0 && ambe_hw_is_active())
+      opts->audio_gain = 26;
+    else if (opts->audio_gain < 50)
       opts->audio_gain++;
 
     state->aout_gain = opts->audio_gain;
@@ -138,7 +234,9 @@ uint8_t ncurses_input_handler(dsd_opts * opts, dsd_state * state, int c)
   if (c == 45) //- key, decrement audio_gain
   {
 
-    if (opts->audio_gain > 0)
+    if (opts->audio_gain == 0 && ambe_hw_is_active())
+      opts->audio_gain = 24;
+    else if (opts->audio_gain > 0)
       opts->audio_gain--;
 
     state->aout_gain = opts->audio_gain;
@@ -165,6 +263,11 @@ uint8_t ncurses_input_handler(dsd_opts * opts, dsd_state * state, int c)
   {
     if (opts->audio_gainA > 0)
       opts->audio_gainA--;
+  }
+
+  if (c == 120) //'x' key, toggle AMBE hardware vocoder / reconnect
+  {
+    ambe_hw_toggle(opts, state);
   }
 
   if (c == 122) //'z' key, toggle payload to console
@@ -223,26 +326,10 @@ uint8_t ncurses_input_handler(dsd_opts * opts, dsd_state * state, int c)
 
   if (c == 105) //'i' key, toggle signal inversion on inverted types
   {
-    //Set all signal for inversion or uninversion
-    if (opts->inverted_dmr == 0)
-    {
-      opts->inverted_dmr = 1;
-      opts->inverted_dpmr = 1;
-      opts->inverted_x2tdma = 1;
-      opts->inverted_ysf = 1;
-      opts->inverted_nxdn = 1;
-    }
-    else
-    {
-      opts->inverted_dmr = 0;
-      opts->inverted_dpmr = 0;
-      opts->inverted_x2tdma = 0;
-      opts->inverted_ysf = 0;
-      opts->inverted_nxdn = 0;
-    }
+    dsd_toggle_signal_inversion(opts);
   }
 
-  if (c == 109) //'m' key, toggle qpsk/c4fm - everything but phase 2
+  if (c == 109 && opts->frame_tetra == 0 && opts->frame_aprs == 0) //'m' key, toggle qpsk/c4fm - everything but phase 2
   {
     if (state->rf_mod == 0)
     {
@@ -264,7 +351,7 @@ uint8_t ncurses_input_handler(dsd_opts * opts, dsd_state * state, int c)
     }
   }
 
-  if (c == 77) //'M' key, toggle qpsk - phase 2 6000 sps
+  if (c == 77 && opts->frame_tetra == 0 && opts->frame_aprs == 0) //'M' key, toggle qpsk - phase 2 6000 sps
   {
     if (state->rf_mod == 0)
     {
@@ -379,6 +466,7 @@ uint8_t ncurses_input_handler(dsd_opts * opts, dsd_state * state, int c)
   if (c == 112) //'p' key - stop all per call wav files //TODO: Fix
   {
     //TODO: Add Closing of RAW files as well?
+    if (opts->frame_tetra == 1) tetra_release_voice_slot(opts, state, 1);
     opts->wav_out_f = close_and_rename_wav_file(opts->wav_out_f, opts->wav_out_file, opts->wav_out_dir, opts->wav_custom_tag, &state->event_history_s[0]);
     opts->wav_out_fR = close_and_rename_wav_file(opts->wav_out_fR, opts->wav_out_fileR, opts->wav_out_dir, opts->wav_custom_tag, &state->event_history_s[1]);
     opts->wav_out_file[0] = 0; //Bugfix for decoded wav file display after disabling
@@ -441,7 +529,7 @@ uint8_t ncurses_input_handler(dsd_opts * opts, dsd_state * state, int c)
     memset (state->nxdn_sacch_frame_segment, 1, sizeof(state->nxdn_sacch_frame_segment));
     memset (state->nxdn_sacch_frame_segcrc, 1, sizeof(state->nxdn_sacch_frame_segcrc));
 
-    memset (state->active_channel, 0, sizeof(state->active_channel));
+    dmr_active_channel_clear (state);
 
     //reset dmr blocks
     dmr_reset_blocks (opts, state);
@@ -451,6 +539,14 @@ uint8_t ncurses_input_handler(dsd_opts * opts, dsd_state * state, int c)
     state->lasttgR = 0;
     state->lastsrc = 0;
     state->lastsrcR = 0;
+    state->dmr_bcast_tg[0] = state->dmr_bcast_tg[1] = 0;
+    state->dmr_hangtime[0] = state->dmr_hangtime[1] = 0;
+    state->dmr_so = 0;
+    state->dmr_soR = 0;
+    state->dmr_fid = 0;
+    state->dmr_fidR = 0;
+    sprintf (state->call_string[0], "%s", "                     "); //21 spaces
+    sprintf (state->call_string[1], "%s", "                     "); //21 spaces
     state->payload_algid = 0;
     state->payload_algidR = 0;
     state->payload_keyid = 0;
@@ -485,7 +581,8 @@ uint8_t ncurses_input_handler(dsd_opts * opts, dsd_state * state, int c)
     state->last_cc_sync_time = time(NULL);
 
     //if P25p2 VCH and going back to P25p1 CC, flip symbolrate
-    if (state->p25_cc_is_tdma == 0)
+    if (opts->frame_tetra == 1) { tetra_release_voice_slot(opts, state, 1); tetra_reset_state(state); }
+    if (state->p25_cc_is_tdma == 0 && (opts->frame_p25p1 == 1 || opts->frame_p25p2 == 1))
     {
       state->samplesPerSymbol = 10;
       state->symbolCenter = 4;
@@ -518,7 +615,7 @@ uint8_t ncurses_input_handler(dsd_opts * opts, dsd_state * state, int c)
     memset (state->nxdn_sacch_frame_segment, 1, sizeof(state->nxdn_sacch_frame_segment));
     memset (state->nxdn_sacch_frame_segcrc, 1, sizeof(state->nxdn_sacch_frame_segcrc));
 
-    memset (state->active_channel, 0, sizeof(state->active_channel));
+    dmr_active_channel_clear (state);
 
     //reset dmr blocks
     dmr_reset_blocks (opts, state);
@@ -528,6 +625,14 @@ uint8_t ncurses_input_handler(dsd_opts * opts, dsd_state * state, int c)
     state->lasttgR = 0;
     state->lastsrc = 0;
     state->lastsrcR = 0;
+    state->dmr_bcast_tg[0] = state->dmr_bcast_tg[1] = 0;
+    state->dmr_hangtime[0] = state->dmr_hangtime[1] = 0;
+    state->dmr_so = 0;
+    state->dmr_soR = 0;
+    state->dmr_fid = 0;
+    state->dmr_fidR = 0;
+    sprintf (state->call_string[0], "%s", "                     "); //21 spaces
+    sprintf (state->call_string[1], "%s", "                     "); //21 spaces
     state->payload_algid = 0;
     state->payload_algidR = 0;
     state->payload_keyid = 0;
@@ -562,7 +667,8 @@ uint8_t ncurses_input_handler(dsd_opts * opts, dsd_state * state, int c)
     state->last_cc_sync_time = time(NULL);
 
     //if P25p2 VCH and going back to P25p1 CC, flip symbolrate
-    if (state->p25_cc_is_tdma == 0)
+    if (opts->frame_tetra == 1) { tetra_release_voice_slot(opts, state, 1); tetra_reset_state(state); }
+    if (state->p25_cc_is_tdma == 0 && (opts->frame_p25p1 == 1 || opts->frame_p25p2 == 1))
     {
       state->samplesPerSymbol = 10;
       state->symbolCenter = 4;
@@ -588,10 +694,15 @@ uint8_t ncurses_input_handler(dsd_opts * opts, dsd_state * state, int c)
     else opts->trunk_tune_data_calls = 1;
   }
 
-  if (opts->p25_trunk == 1 && c == 101) //'e' key, toggle tune enc calls (P25 only on certain grants)
+  if (opts->p25_trunk == 1 && opts->frame_tetra == 0 && c == 101) //'e' key, toggle tune enc calls (P25 only on certain grants)
   {
     if (opts->trunk_tune_enc_calls == 1) opts->trunk_tune_enc_calls = 0;
     else opts->trunk_tune_enc_calls = 1;
+  }
+
+  if (c == 69 || ((opts->p25_trunk == 0 || opts->frame_tetra == 1) && c == 101)) //'E' key (or 'e' when not trunking), toggle muting encrypted traffic
+  {
+    dsd_toggle_encrypted_mute(opts);
   }
 
   if (opts->p25_trunk == 1 && c == 84) //'T' key, toggle tune group calls
@@ -611,11 +722,18 @@ uint8_t ncurses_input_handler(dsd_opts * opts, dsd_state * state, int c)
     //dmr trunking/ncurses stuff
     state->dmr_rest_channel = -1; //init on -1
     state->dmr_mfid = -1; //
+    trunk_reset_dmr_channel_state();
 
     //dmr mfid branding and site parms
     sprintf(state->dmr_branding_sub, "%s", "");
     sprintf(state->dmr_branding, "%s", "");
     sprintf (state->dmr_site_parms, "%s", "");
+    state->dmr_t3_syscode = 0;
+    state->dmr_t3_net_key = 0;
+    state->dmr_t3_seen_count = 0;
+    state->dmr_t3_auto_n = 0;
+    state->dmr_neighbor_count = 0;
+    dmr_active_channel_clear (state);
 
     //DMR Location Area - DMRLA B***S***
     opts->dmr_dmrla_is_set = 0;
@@ -634,6 +752,52 @@ uint8_t ncurses_input_handler(dsd_opts * opts, dsd_state * state, int c)
     state->nxdn_step = 0;
     state->nxdn_bw = 0;
 
+    //reset TETRA site/cell and slot info
+    tetra_release_voice_slot(opts, state, 1);
+    tetra_reset_state(state);
+
+    //reset APRS call info
+    if (opts->frame_aprs == 1)
+      aprs_init_state(state);
+
+  }
+
+  if (c == 110) //'n' key - cycle DMRLA n value (Auto -> 0..max_n -> Auto)
+  {
+    uint16_t dummy_net = 0, cur_site = 0, max_n = 10;
+    if (state->dmr_t3_syscode != 0 || strncmp (state->dmr_site_parms, "TIII", 4) == 0)
+    {
+      dmr_parse_t3_syscode ((uint16_t)state->dmr_t3_syscode, &dummy_net, &cur_site, &max_n, NULL, 0);
+      uint16_t max_site = cur_site;
+      if (state->dmr_t3_syscode != 0)
+      {
+        for (uint8_t i = 0; i < state->dmr_neighbor_count; i++)
+        {
+          uint16_t nb_net = 0, nb_site = 0, nb_def_n = 1;
+          dmr_parse_t3_syscode (state->dmr_neighbors[i], &nb_net, &nb_site, &nb_def_n, NULL, 0);
+          if (nb_site > max_site)
+            max_site = nb_site;
+        }
+      }
+      while (max_n > 1 && (max_site >> (max_n - 1)) == 0)
+        max_n--;
+    }
+
+    if (opts->dmr_dmrla_is_set == 0)
+    {
+      opts->dmr_dmrla_is_set = 1;
+      opts->dmr_dmrla_n = 0;
+    }
+    else if (opts->dmr_dmrla_n < max_n)
+    {
+      opts->dmr_dmrla_n++;
+    }
+    else
+    {
+      opts->dmr_dmrla_is_set = 0;
+      opts->dmr_dmrla_n = 0;
+    }
+    dmr_refresh_t3_site_parms (opts, state);
   }
 
   //Debug/Troubleshooting Option
@@ -657,7 +821,7 @@ uint8_t ncurses_input_handler(dsd_opts * opts, dsd_state * state, int c)
 
   if (c == 92) //'\' key - toggle events for slot displayed, and reset eh_index
   {
-    state->eh_slot ^= 1;
+    state->eh_slot = (state->eh_slot + 1) % 3;
     state->eh_index = 0;
   }
 
@@ -696,7 +860,11 @@ uint8_t ncurses_input_handler(dsd_opts * opts, dsd_state * state, int c)
     //use same or last specified host for TCP audio sink for connection
     memcpy (opts->rigctlhostname, opts->tcp_hostname, sizeof (opts->rigctlhostname) );
     opts->rigctl_sockfd = Connect(opts->rigctlhostname, opts->rigctlportno);
-    if (opts->rigctl_sockfd != 0) opts->use_rigctl = 1;
+    if (opts->rigctl_sockfd != 0)
+    {
+      opts->use_rigctl = 1;
+      trunk_init_access_code_lookup(opts, state);
+    }
     else opts->use_rigctl = 0;
   }
 
@@ -708,7 +876,7 @@ uint8_t ncurses_input_handler(dsd_opts * opts, dsd_state * state, int c)
     memset (state->nxdn_sacch_frame_segment, 1, sizeof(state->nxdn_sacch_frame_segment));
     memset (state->nxdn_sacch_frame_segcrc, 1, sizeof(state->nxdn_sacch_frame_segcrc));
 
-    memset (state->active_channel, 0, sizeof(state->active_channel));
+    dmr_active_channel_clear (state);
 
     //reset dmr blocks
     dmr_reset_blocks (opts, state);
@@ -718,6 +886,14 @@ uint8_t ncurses_input_handler(dsd_opts * opts, dsd_state * state, int c)
     state->lasttgR = 0;
     state->lastsrc = 0;
     state->lastsrcR = 0;
+    state->dmr_bcast_tg[0] = state->dmr_bcast_tg[1] = 0;
+    state->dmr_hangtime[0] = state->dmr_hangtime[1] = 0;
+    state->dmr_so = 0;
+    state->dmr_soR = 0;
+    state->dmr_fid = 0;
+    state->dmr_fidR = 0;
+    sprintf (state->call_string[0], "%s", "                     "); //21 spaces
+    sprintf (state->call_string[1], "%s", "                     "); //21 spaces
     state->payload_algid = 0;
     state->payload_algidR = 0;
     state->payload_keyid = 0;
@@ -728,6 +904,8 @@ uint8_t ncurses_input_handler(dsd_opts * opts, dsd_state * state, int c)
     state->payload_miN = 0;
     opts->p25_is_tuned = 0;
     state->p25_vc_freq[0] = state->p25_vc_freq[1] = 0;
+    state->gi[0] = -1;
+    state->gi[1] = -1;
 
     //tune back to the control channel -- NOTE: Doesn't work correctly on EDACS Analog Voice
     //RIGCTL
@@ -745,14 +923,15 @@ uint8_t ncurses_input_handler(dsd_opts * opts, dsd_state * state, int c)
     state->last_cc_sync_time = time(NULL);
 
     //if P25p2 VCH and going back to P25p1 CC, flip symbolrate
-    if (state->p25_cc_is_tdma == 0)
+    if (opts->frame_tetra == 1) { tetra_release_voice_slot(opts, state, 1); tetra_reset_state(state); }
+    if (state->p25_cc_is_tdma == 0 && (opts->frame_p25p1 == 1 || opts->frame_p25p2 == 1))
     {
       state->samplesPerSymbol = 10;
       state->symbolCenter = 4;
     }
 
     //if P25p1 Data Revert on P25p2 TDMA CC, flip symbolrate
-    if (state->p25_cc_is_tdma == 1)
+    if (state->p25_cc_is_tdma == 1 && (opts->frame_p25p1 == 1 || opts->frame_p25p2 == 1))
     {
       state->samplesPerSymbol = 8;
       state->symbolCenter = 3;
@@ -770,7 +949,7 @@ uint8_t ncurses_input_handler(dsd_opts * opts, dsd_state * state, int c)
     memset (state->nxdn_sacch_frame_segment, 1, sizeof(state->nxdn_sacch_frame_segment));
     memset (state->nxdn_sacch_frame_segcrc, 1, sizeof(state->nxdn_sacch_frame_segcrc));
 
-    memset (state->active_channel, 0, sizeof(state->active_channel));
+    dmr_active_channel_clear (state);
 
     //reset dmr blocks
     dmr_reset_blocks (opts, state);
@@ -780,6 +959,14 @@ uint8_t ncurses_input_handler(dsd_opts * opts, dsd_state * state, int c)
     state->lasttgR = 0;
     state->lastsrc = 0;
     state->lastsrcR = 0;
+    state->dmr_bcast_tg[0] = state->dmr_bcast_tg[1] = 0;
+    state->dmr_hangtime[0] = state->dmr_hangtime[1] = 0;
+    state->dmr_so = 0;
+    state->dmr_soR = 0;
+    state->dmr_fid = 0;
+    state->dmr_fidR = 0;
+    sprintf (state->call_string[0], "%s", "                     "); //21 spaces
+    sprintf (state->call_string[1], "%s", "                     "); //21 spaces
     state->payload_algid = 0;
     state->payload_algidR = 0;
     state->payload_keyid = 0;
@@ -790,6 +977,8 @@ uint8_t ncurses_input_handler(dsd_opts * opts, dsd_state * state, int c)
     state->payload_miN = 0;
     opts->p25_is_tuned = 0;
     state->p25_vc_freq[0] = state->p25_vc_freq[1] = 0;
+    state->gi[0] = -1;
+    state->gi[1] = -1;
 
     //just copy and pasted the cycle logic for CC/signal hunting on no sync
     if (state->lcn_freq_roll >= state->lcn_freq_count) //fixed this to skip the extra wait out at the end of the list
@@ -840,14 +1029,15 @@ uint8_t ncurses_input_handler(dsd_opts * opts, dsd_state * state, int c)
     //may need to test to see if we want to do the conditional below or not for symbol rate flipping
 
     //if P25p2 VCH and going back to P25p1 CC, flip symbolrate
-    if (state->p25_cc_is_tdma == 0)
+    if (opts->frame_tetra == 1) { tetra_release_voice_slot(opts, state, 1); tetra_reset_state(state); }
+    if (state->p25_cc_is_tdma == 0 && (opts->frame_p25p1 == 1 || opts->frame_p25p2 == 1))
     {
       state->samplesPerSymbol = 10;
       state->symbolCenter = 4;
     }
 
     //if P25p1 Data Revert on P25p2 TDMA CC, flip symbolrate
-    if (state->p25_cc_is_tdma == 1)
+    if (state->p25_cc_is_tdma == 1 && (opts->frame_p25p1 == 1 || opts->frame_p25p2 == 1))
     {
       state->samplesPerSymbol = 8;
       state->symbolCenter = 3;

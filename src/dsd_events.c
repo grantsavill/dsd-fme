@@ -82,7 +82,7 @@ void push_event_history (Event_History_I * event_struct)
     sprintf (event_struct->Event_History_Items[i].t_mode, "%s", event_struct->Event_History_Items[i-1].t_mode);
     sprintf (event_struct->Event_History_Items[i].s_mode, "%s", event_struct->Event_History_Items[i-1].s_mode);
     event_struct->Event_History_Items[i].channel = event_struct->Event_History_Items[i-1].channel;
-    event_struct->Event_History_Items[i].event_time = event_struct->Event_History_Items[i+1].event_time;
+    event_struct->Event_History_Items[i].event_time = event_struct->Event_History_Items[i-1].event_time;
 
     memcpy  (event_struct->Event_History_Items[i].pdu, event_struct->Event_History_Items[i-1].pdu, sizeof(event_struct->Event_History_Items[0].pdu));
     sprintf (event_struct->Event_History_Items[i].sysid_string, "%s", event_struct->Event_History_Items[i-1].sysid_string);
@@ -121,6 +121,18 @@ void write_event_to_log_file (dsd_opts * opts, dsd_state * state, uint8_t slot, 
   fclose (event_log_file);
 }
 
+static int dmr_is_live_synctype (int synctype)
+{
+  return (synctype == 10 || synctype == 11 || synctype == 12 || synctype == 13 ||
+          synctype == 32 || synctype == 33 || synctype == 34);
+}
+
+static int dmr_slot_has_call_burst (const dsd_state * state, uint8_t slot)
+{
+  uint8_t burst = (slot == 0) ? state->dmrburstL : state->dmrburstR;
+  return (burst == 0 || burst == 1 || burst == 2 || burst == 16 || state->dmr_hangtime[slot]);
+}
+
 // run once per loop to check for and push and update event history
 void watchdog_event_history (dsd_opts * opts, dsd_state * state, uint8_t slot)
 {
@@ -141,6 +153,11 @@ void watchdog_event_history (dsd_opts * opts, dsd_state * state, uint8_t slot)
     source_id = state->lastsrc;
   else
     source_id = state->lastsrcR;
+
+  if (opts->playfiles == 0 && dmr_is_live_synctype(state->lastsynctype) &&
+      (last_source_id == 0 || event_struct->Event_History_Items[0].subtype == 6) &&
+      !dmr_slot_has_call_burst(state, slot))
+    source_id = 0;
 
   //if DMR BS or P25P2, then flag the swrite, so write can append slot value to event history log //|| state->lastsynctype == 32 || state->lastsynctype == 33 || state->lastsynctype == 34　MS
   if (state->lastsynctype == 10 || state->lastsynctype == 11 || state->lastsynctype == 12 || state->lastsynctype == 13)
@@ -202,7 +219,7 @@ void watchdog_event_history (dsd_opts * opts, dsd_state * state, uint8_t slot)
   }
 
   //call alert beep when new call detected
-  if (last_source_id == 0 && source_id != 0 && opts->call_alert == 1)
+  if (last_source_id == 0 && source_id != 0 && source_id != DMR_CC_GRANT_SRC && opts->call_alert == 1)
     beeper (opts, state, slot, 40, 86, 3);
   
   if (source_id != last_source_id && last_source_id != 0)
@@ -213,7 +230,7 @@ void watchdog_event_history (dsd_opts * opts, dsd_state * state, uint8_t slot)
 
     event_struct->Event_History_Items[0].write = 1; //written, or pushed at this point
 
-    if (opts->static_wav_file == 0)
+    if (opts->static_wav_file == 0 && last_source_id != DMR_CC_GRANT_SRC)
     {
 
       if (slot == 0 && opts->wav_out_f != NULL)
@@ -237,10 +254,11 @@ void watchdog_event_history (dsd_opts * opts, dsd_state * state, uint8_t slot)
     memset(state->ysf_txt, 0, sizeof(state->ysf_txt));
     memset(state->dstar_gps, 0, sizeof(state->dstar_gps));
     memset(state->dstar_txt, 0, sizeof(state->dstar_txt));
-    state->gi[slot] = -1; //return to an unset value
+    if (source_id == 0)
+      state->gi[slot] = -1; //return to an unset value only when call has cleared
 
     //end of voice call alert
-    if (opts->call_alert == 1)
+    if (opts->call_alert == 1 && last_source_id != DMR_CC_GRANT_SRC)
       beeper (opts, state, slot, 40, 86, 3);
   }
 
@@ -330,6 +348,11 @@ void watchdog_event_current (dsd_opts * opts, dsd_state * state, uint8_t slot)
     mi = state->payload_miR;
   }
 
+  if (opts->playfiles == 0 && dmr_is_live_synctype(state->lastsynctype) &&
+      (event_struct->Event_History_Items[0].source_id == 0 || event_struct->Event_History_Items[0].subtype == 6) &&
+      !dmr_slot_has_call_burst(state, slot))
+    source_id = 0;
+
   //if P25 (if not P25, then these will all be zero anyways)
   sys_id1 = state->p2_wacn;
   sys_id2 = state->p2_sysid;
@@ -343,15 +366,32 @@ void watchdog_event_current (dsd_opts * opts, dsd_state * state, uint8_t slot)
     sprintf (sysid_string, "P25_%05X%03X%03X_%d_%d", sys_id1, sys_id2, sys_id3, sys_id4, sys_id5);
   else sprintf (sysid_string, "P25_%03X", sys_id3);
 
-  if (state->lastsynctype == 10 || state->lastsynctype == 11 || state->lastsynctype == 12 || state->lastsynctype == 13 ||
-     state->lastsynctype == 32 || state->lastsynctype == 33 || state->lastsynctype == 34                                  )
+  if (dmr_is_live_synctype(state->lastsynctype))
   {
     sys_id1 = state->dmr_t3_syscode;
-    sys_id2 = state->dmr_color_code;
+    if (state->dmr_color_code <= 15)
+      sys_id2 = state->dmr_color_code;
+    else if (source_id != 0 &&
+             event_struct->Event_History_Items[0].source_id == source_id &&
+             event_struct->Event_History_Items[0].systype == state->lastsynctype &&
+             event_struct->Event_History_Items[0].subtype != 6 &&
+             event_struct->Event_History_Items[0].sys_id2 <= 15)
+      sys_id2 = event_struct->Event_History_Items[0].sys_id2;
+    else
+      sys_id2 = 16;
 
-    if (sys_id1)
-      sprintf (sysid_string, "DMR_%X_CC_%d", sys_id1, sys_id2);
-    else sprintf (sysid_string, "DMR_CC_%d", sys_id2);
+    if (sys_id2 <= 15)
+    {
+      if (sys_id1)
+        sprintf (sysid_string, "DMR_%X_CC_%d", sys_id1, sys_id2);
+      else sprintf (sysid_string, "DMR_CC_%d", sys_id2);
+    }
+    else
+    {
+      if (sys_id1)
+        sprintf (sysid_string, "DMR_%X", sys_id1);
+      else sprintf (sysid_string, "DMR");
+    }
   }
 
   if (slot == 0) //BUGFIX: generic catch on FDMA systems so that we don't write duplicate data to slot 2 event history
@@ -442,6 +482,16 @@ void watchdog_event_current (dsd_opts * opts, dsd_state * state, uint8_t slot)
       sprintf (sysid_string, "M17_CAN_%d", sys_id1);
       sprintf (src_str, "%s", state->m17_src_csd);
       sprintf (tgt_str, "%s", state->m17_dst_csd);
+    }
+
+    if (state->lastsynctype == 41 || state->lastsynctype == 42) //TETRA
+    {
+      sys_id1 = state->tetra_mcc;
+      sys_id2 = state->tetra_mnc;
+      sys_id3 = state->tetra_colour_code;
+      enc = state->tetra_enc;
+      alg_id = state->tetra_enc_alg;
+      sprintf (sysid_string, "TETRA_%03u_%04u_CC_%02u", sys_id1, sys_id2, sys_id3);
     }
 
     if (state->lastsynctype == 6 || state->lastsynctype == 7 || state->lastsynctype == 18 || state->lastsynctype == 19) //DSTAR
@@ -577,7 +627,7 @@ void watchdog_event_current (dsd_opts * opts, dsd_state * state, uint8_t slot)
     }
   }
 
-  if (source_id != 0) //&& state->gi[slot] == 1
+  if (source_id != 0 && source_id != DMR_CC_GRANT_SRC) //&& state->gi[slot] == 1
   {
     for (int i = 0; i < state->group_tally; i++)
     {
@@ -714,13 +764,39 @@ void watchdog_event_current (dsd_opts * opts, dsd_state * state, uint8_t slot)
       sprintf (event_string, "%s %s %s AFS: %s (%04d); %s LCN: %02d; Site: %d; %s; ", datestr, timestr, sys_string, afs_str, afs, lid_str, channel, sys_id1, sup_str);
     }
   }
-  else if (state->lastsynctype == 10 || state->lastsynctype == 11 || state->lastsynctype == 12 || state->lastsynctype == 13 ||
-     state->lastsynctype == 32 || state->lastsynctype == 33 || state->lastsynctype == 34                                  ) //DMR
+  else if (dmr_is_live_synctype(state->lastsynctype)) //DMR
   {
-    if (sys_id1)
-      sprintf (event_string, "%s %s %s TGT: %08d; SRC: %08d; CC: %02d; SYS: %X; ", datestr, timestr, sys_string, target_id, source_id, sys_id2, sys_id1);
+    if (source_id == DMR_CC_GRANT_SRC)
+    {
+      if (sys_id2 <= 15)
+      {
+        if (sys_id1)
+          sprintf (event_string, "%s %s %s TGT: %08d; CC: %02d; SYS: %X; ", datestr, timestr, sys_string, target_id, sys_id2, sys_id1);
+        else
+          sprintf (event_string, "%s %s %s TGT: %08d; CC: %02d; ", datestr, timestr, sys_string, target_id, sys_id2);
+      }
+      else
+      {
+        if (sys_id1)
+          sprintf (event_string, "%s %s %s TGT: %08d; SYS: %X; ", datestr, timestr, sys_string, target_id, sys_id1);
+        else
+          sprintf (event_string, "%s %s %s TGT: %08d; ", datestr, timestr, sys_string, target_id);
+      }
+    }
+    else if (sys_id2 <= 15)
+    {
+      if (sys_id1)
+        sprintf (event_string, "%s %s %s TGT: %08d; SRC: %08d; CC: %02d; SYS: %X; ", datestr, timestr, sys_string, target_id, source_id, sys_id2, sys_id1);
+      else
+        sprintf (event_string, "%s %s %s TGT: %08d; SRC: %08d; CC: %02d; ", datestr, timestr, sys_string, target_id, source_id, sys_id2);
+    }
     else
-      sprintf (event_string, "%s %s %s TGT: %08d; SRC: %08d; CC: %02d; ", datestr, timestr, sys_string, target_id, source_id, sys_id2);
+    {
+      if (sys_id1)
+        sprintf (event_string, "%s %s %s TGT: %08d; SRC: %08d; SYS: %X; ", datestr, timestr, sys_string, target_id, source_id, sys_id1);
+      else
+        sprintf (event_string, "%s %s %s TGT: %08d; SRC: %08d; ", datestr, timestr, sys_string, target_id, source_id);
+    }
     if (enc)
       strcat(event_string, "ENC; ");
     if (alg_id != 0)
@@ -752,10 +828,14 @@ void watchdog_event_current (dsd_opts * opts, dsd_state * state, uint8_t slot)
         strcat (event_string, "TXI; ");
       else if (svc_opts & 0x10)
         strcat (event_string, "TXI; "); //this is the svc opt bit that tells you when the next VC6 will be pre-empted, but not helpful here
-
-      if (svc_opts & 0x03)
-        strcat (event_string, "PRIORITY; "); //need to break this apart into each one, but need to double check the decoded value is accurate
     }
+
+    if ((svc_opts & 0x03) == 0x01)
+      strcat (event_string, "Priority 1; ");
+    else if ((svc_opts & 0x03) == 0x02)
+      strcat (event_string, "Priority 2; ");
+    else if ((svc_opts & 0x03) == 0x03)
+      strcat (event_string, "Priority 3; ");
     
   }
   else if (state->lastsynctype == 0 || state->lastsynctype == 1 || state->lastsynctype == 35 || state->lastsynctype == 36)
@@ -811,7 +891,7 @@ void watchdog_event_current (dsd_opts * opts, dsd_state * state, uint8_t slot)
     strcat (event_string, private);
   }
 
-  sprintf (event_struct->Event_History_Items[0].event_string, "%s", event_string);
+  if (source_id != 0) sprintf (event_struct->Event_History_Items[0].event_string, "%s", event_string);
 
   if (timestr != NULL)
   {

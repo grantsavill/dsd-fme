@@ -54,6 +54,7 @@
 
 #include <math.h>
 #include <mbelib.h>
+#include "ambe_hw.h"
 #include <sndfile.h>
 
 #include "p25p1_heuristics.h"
@@ -417,6 +418,9 @@ typedef struct
   short int aggressive_framesync;
 
   int frame_m17;
+  int frame_tetra;
+  int inverted_tetra;
+  int frame_aprs;
 
   FILE *symbolfile;
   int call_alert;
@@ -469,6 +473,18 @@ typedef struct
 
   //DMR Late Entry
   uint8_t dmr_le; //user option to turn on or turn off late entry for enc identifiers
+
+  //DMR Color Code Filter (-1 = disabled / allow all 0-15; 0..15 = only allow matching CC)
+  int dmr_cc_filter;
+
+  //NXDN RAN Filter (-1 = disabled / allow all 0-63; 0..63 = only allow matching RAN/Area)
+  int nxdn_ran_filter;
+
+  //P25 NAC Filter (-1 = disabled / allow all 0x000-0xFFF; 0..0xFFF = only allow matching NAC)
+  int p25_nac_filter;
+
+  //TETRA Colour Code Filter (-1 = disabled / allow all 0-63; 0..63 = only allow matching CC)
+  int tetra_cc_filter;
 
   //Trunking - Use Group List as Allow List
   uint8_t trunk_use_allow_list;
@@ -681,6 +697,12 @@ typedef struct
 
   unsigned int dmr_color_code;
   unsigned int dmr_t3_syscode;
+  uint16_t dmr_t3_net_key;
+  uint8_t  dmr_t3_seen_count;
+  uint8_t  dmr_t3_auto_n;
+  uint16_t dmr_t3_seen_sites[64];
+  uint8_t  dmr_neighbor_count;
+  uint16_t dmr_neighbors[32];
   unsigned int nxdn_last_ran;
   unsigned int nxdn_last_rid;
   unsigned int nxdn_last_tg;
@@ -698,6 +720,9 @@ typedef struct
 
   unsigned int color_code;
   unsigned int color_code_ok;
+  uint8_t dmr_unconfirmed_sync;
+  time_t dmr_unconfirmed_cc_sync_time;
+  time_t dmr_unconfirmed_vc_sync_time;
   unsigned int PI;
   unsigned int PI_ok;
   unsigned int LCSS;
@@ -710,6 +735,8 @@ typedef struct
   unsigned int dmr_fidR;
   unsigned int dmr_soR;
   unsigned int dmr_flcoR;
+  uint32_t dmr_bcast_tg[2];
+  uint8_t  dmr_hangtime[2];
 
   char slot1light[8];
   char slot2light[8];
@@ -743,11 +770,28 @@ typedef struct
   uint8_t dmr_alias_block_len[2]; //per slot
   uint8_t dmr_alias_char_size[2]; //per slot
   char dmr_alias_block_segment[2][4][7][16]; //2 slots, by 4 blocks, by up to 7 alias bytes that are up to 16-bit chars
+  //dedicated DMR TA storage (kept separate from dmr_pdu_sf so data/CACH error resets don't wipe it)
+  uint8_t dmr_alias_hdr_bits[2][49];    //alias bits carried in the TA header (49 for ISO7, 48 otherwise)
+  uint8_t dmr_alias_blk_bits[2][3][56]; //alias bits carried in TA blocks 1-3
+  uint8_t dmr_alias_hdr_ok[2];          //TA header received for current talker
+  uint8_t dmr_alias_blk_ok[2];          //bitmask of TA blocks received for current talker (may arrive before header)
+  uint32_t dmr_alias_src[2];            //source id the stored TA pieces belong to
+  //dedicated P25 TA storage (kept separate from dmr_pdu_sf)
+  uint8_t p25_apx_bits[2][24*128];      //APX P1/P2 assembled header + blocks bit buffer
+  uint8_t p25_apx_hdr_ok[2];            //APX TA header received
+  uint8_t p25_apx_ta_len[2];            //APX TA block count from header
+  uint8_t p25_apx_sn[2];                //APX TA sequence number
+  uint32_t p25_apx_blk_ok[2];           //bitmask of APX TA blocks 1..31 received
+  uint8_t p25_l3h_bytes[2][32];         //L3Harris P1 assembled alias bytes
+  uint8_t p25_l3h_blk_ok[2];            //bitmask of L3Harris P1 blocks 0..3 received
   char dmr_embedded_gps[2][600]; //2 slots by 99 char string for string embedded gps
   char dmr_lrrp_gps[2][600]; //2 slots by 99 char string for string lrrp gps
   char dmr_site_parms[200]; //string for site/net info depending on type of DMR system (TIII or Con+)
   char call_string[2][200]; //string for call information
   char active_channel[31][200]; //string for storing and displaying active trunking channels
+  uint16_t dmr_t3_active_chan[31]; //TIII channel key per active_channel entry (0 = unused)
+  uint8_t  dmr_t3_active_slot[31]; //TIII TDMA slot (0 or 1) per active_channel entry
+  time_t   dmr_t3_active_time[31]; //TIII last grant/refresh timestamp per active_channel entry
 
   //Generic Talker Alias String
   char generic_talker_alias[2][500];
@@ -902,6 +946,10 @@ typedef struct
   uint8_t nxdn_sacch_frame_segcrc[4];
   uint8_t nxdn_alias_block_number;
   char nxdn_alias_block_segment[4][4][8];
+  uint8_t nxdn_alias_buf[96];           //dedicated NXDN TA assembly buffer
+  uint16_t nxdn_alias_blk_ok;           //bitmask of NXDN TA blocks/segments received
+  uint8_t nxdn_alias_total;             //expected total NXDN TA blocks/segments
+  uint32_t nxdn_alias_src;              //source id the stored NXDN TA pieces belong to
   uint16_t nxdn_pn95_seed;
 
   //site/srv/cch info
@@ -1040,6 +1088,121 @@ typedef struct
   uint8_t static_ks_bits[2][882];
   int static_ks_counter[2];
 
+  //TETRA Mode state
+  uint8_t tetra_mode; /* 0 = TMO Downlink, 1 = DMO, 2 = TMO Uplink */
+  uint8_t tetra_dmo_comm_type; /* 0 = Direct MS-MS, 1 = DM-REP, 2 = DM-GATE, 3 = DM-REP/GATE */
+  uint8_t tetra_sps_phase;
+  uint8_t tetra_burst_type;
+  uint16_t tetra_mcc;
+  uint16_t tetra_mnc;
+  uint8_t tetra_colour_code;
+  uint32_t tetra_scramb_init;
+  uint8_t tetra_scramb_valid;
+  uint8_t tetra_dl_usage;
+  uint8_t tetra_ul_usage;
+  uint8_t tetra_slot;
+  uint8_t tetra_frame;
+  uint8_t tetra_multiframe;
+  uint16_t tetra_hyperframe;
+  uint16_t tetra_la;
+  uint16_t tetra_main_carrier;
+  uint8_t tetra_freq_band;
+  uint8_t tetra_offset_idx;
+  uint8_t tetra_duplex_spacing;
+  double tetra_dl_freq_mhz;
+  uint32_t tetra_last_tg;
+  uint32_t tetra_last_src;
+  uint16_t tetra_call_id;
+  uint16_t tetra_carrier;
+  uint8_t tetra_ts_mask;
+  uint8_t tetra_enc;
+  uint8_t tetra_enc_alg;
+  uint8_t tetra_aie_enc;
+  uint8_t tetra_sec_class;
+  uint8_t tetra_matched_key[16];
+  uint8_t tetra_matched_key_len;
+  uint8_t tetra_matched_alg;
+  char tetra_matched_key_str[40];
+  uint8_t tetra_nc_count;
+  uint16_t tetra_nc_carriers[16];
+  double tetra_nc_freqs[16];
+  uint32_t tetra_ev_ssi_cache[16];
+  time_t tetra_ev_time_cache[16];
+  uint8_t tetra_ev_cache_idx;
+  uint16_t tetra_status_code;
+  char tetra_call_type[64];
+  char tetra_pdu_str[128];
+  char tetra_sds_str[256];
+  char tetra_lip_str[256];
+  char tetra_country_str[64];
+  uint8_t tetra_mac_frag_buf[4096];
+  uint16_t tetra_mac_frag_len;
+  uint8_t tetra_mac_frag_active;
+  uint8_t tetra_mac_frag_enc;
+  uint32_t tetra_mac_frag_ssi;
+  int16_t tetra_raw_hist[4];
+  int16_t tetra_sub_buf[8192];
+  uint32_t tetra_sub_write_idx;
+  uint32_t tetra_sub_read_idx;
+  uint32_t tetra_prev_sub_read_idx;
+  uint32_t tetra_sync_sub_idx;
+  uint32_t tetra_last_sync_sub;
+  int32_t tetra_sym_ring[1024];
+  uint32_t tetra_sym_count;
+  uint32_t tetra_bin_write_count;
+  uint32_t tetra_sync_sym_count;
+  uint32_t tetra_last_sync_sym;
+  uint8_t tetra_tdma_locked;
+  uint8_t tetra_bit_swap;
+  float tetra_center;
+  float tetra_step_level;
+  uint8_t tetra_bsch_tn;
+  uint8_t tetra_bsch_fn;
+  uint8_t tetra_bsch_mn;
+  int16_t tetra_cod_batch[6 * 690];
+  uint8_t tetra_cod_batch_count;
+  int16_t tetra_serial_hist[20 * 138];
+  uint8_t tetra_serial_hist_frames;
+  time_t tetra_last_voice_time;
+  uint8_t tetra_voice_slot;
+  uint8_t tetra_voice_usage;
+  uint32_t tetra_voice_last_sym;
+  uint8_t tetra_ts_usage[4];
+  uint32_t tetra_ts_tg[4];
+  uint32_t tetra_ts_src[4];
+  uint16_t tetra_ts_call_id[4];
+  char tetra_ts_type[4][64];
+  uint32_t tetra_ts_last_sym[4];
+  uint8_t tetra_ts_cand_usage[4];
+  uint8_t tetra_ts_cand_count[4];
+  uint32_t tetra_ts_cand_sym[4];
+  uint8_t tetra_ts_idle_count[4];
+  uint8_t tetra_ts_logged[4];
+  uint32_t tetra_usage_ssi[64];
+
+  //APRS / AX.25 Mode state
+  int aprs_frame_ready;
+  uint32_t aprs_pkt_count;
+  uint32_t aprs_src_id;
+  time_t aprs_last_pkt_time;
+  char aprs_src[16];
+  char aprs_dst[16];
+  char aprs_path[96];
+  char aprs_type[32];
+  char aprs_symbol[4];
+  char aprs_symbol_desc[48];
+  double aprs_lat;
+  double aprs_lon;
+  int aprs_has_pos;
+  double aprs_speed_kmh;
+  int aprs_course;
+  double aprs_altitude_m;
+  int aprs_has_alt;
+  char aprs_wx_str[128];
+  char aprs_comment[256];
+  char aprs_tnc2[320];
+  int aprs_baud;
+  int aprs_peak;
 } dsd_state;
 
 /*
@@ -1145,6 +1308,8 @@ typedef struct
  */
 
 void processdPMRvoice (dsd_opts * opts, dsd_state * state);
+void processTetra (dsd_opts * opts, dsd_state * state);
+int tetra_check_sync (dsd_opts * opts, dsd_state * state);
 void processAudio (dsd_opts * opts, dsd_state * state);
 void processAudioR (dsd_opts * opts, dsd_state * state);
 void openPulseInput (dsd_opts * opts);
@@ -1274,6 +1439,22 @@ void processM17STR(dsd_opts * opts, dsd_state * state); //M17 (STR)
 void processP2(dsd_opts * opts, dsd_state * state); //P2
 void processTSBK(dsd_opts * opts, dsd_state * state); //P25 Trunking Single Block
 void processMPDU(dsd_opts * opts, dsd_state * state); //P25 Multi Block PDU (SAP 0x61 FMT 0x15 or 0x17 for Trunking Blocks)
+int tetra_prepare_symbol_steps(dsd_opts * opts, dsd_state * state);
+void tetra_push_audio_sample(dsd_opts * opts, dsd_state * state, short sample);
+int tetra_finish_symbol(dsd_opts * opts, dsd_state * state);
+int tetra_check_sync(dsd_opts * opts, dsd_state * state);
+void processTetra(dsd_opts * opts, dsd_state * state);
+void tetra_flush_voice_batch(dsd_opts * opts, dsd_state * state);
+void tetra_release_voice_slot(dsd_opts * opts, dsd_state * state, int flush_pending);
+void tetra_clear_cell_state(dsd_state * state);
+void tetra_reset_state(dsd_state * state);
+const char *tetra_get_tea_name(const dsd_state *state, int is_encrypted);
+int tetra_voice_codec_available(void);
+void aprs_init_state(dsd_state * state);
+void aprs_reset_state(dsd_state * state);
+void aprs_push_audio_sample(dsd_opts * opts, dsd_state * state, short sample);
+int aprs_check_sync(dsd_opts * opts, dsd_state * state);
+void processAPRS(dsd_opts * opts, dsd_state * state);
 short dmr_filter(short sample);
 short nxdn_filter(short sample);
 short dpmr_filter(short sample);
@@ -1294,6 +1475,8 @@ void ncursesOpen (dsd_opts * opts, dsd_state * state);
 void ncursesPrinter (dsd_opts * opts, dsd_state * state);
 void ncursesMenu (dsd_opts * opts, dsd_state * state);
 uint8_t ncurses_input_handler(dsd_opts * opts, dsd_state * state, int c);
+void dsd_toggle_signal_inversion(dsd_opts * opts);
+void dsd_toggle_encrypted_mute(dsd_opts * opts);
 void ncursesClose ();
 
 //NXDN Functions Start Here
@@ -1417,16 +1600,30 @@ void dmr_data_sync (dsd_opts * opts, dsd_state * state);
 void dmr_pi (dsd_opts * opts, dsd_state * state, uint8_t PI_BYTE[], uint32_t CRCCorrect, uint32_t IrrecoverableErrors);
 void dmr_flco (dsd_opts * opts, dsd_state * state, uint8_t lc_bits[], uint32_t CRCCorrect, uint32_t * IrrecoverableErrors, uint8_t type);
 void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8_t cs_pdu[], uint32_t CRCCorrect, uint32_t IrrecoverableErrors);
+void dmr_active_channel_clear (dsd_state * state);
+void dmr_t3_active_expire (const dsd_opts * opts, dsd_state * state, time_t now);
+void dmr_parse_t3_syscode (uint16_t syscode, uint16_t * net_out, uint16_t * site_out,
+                           uint16_t * def_n_out, char * model_str, size_t model_sz);
+void dmr_record_t3_syscode (dsd_state * state, uint16_t syscode, int is_neighbor);
+uint16_t dmr_effective_t3_n (const dsd_opts * opts, const dsd_state * state,
+                             uint16_t syscode, uint16_t def_n, int is_capmax);
+void dmr_refresh_t3_site_parms (dsd_opts * opts, dsd_state * state);
 void dmr_slco (dsd_opts * opts, dsd_state * state, uint8_t slco_bits[]);
 uint8_t dmr_cach (dsd_opts * opts, dsd_state * state, uint8_t cach_bits[25]);
 uint32_t viterbi_r34 (uint8_t * input, uint8_t * output);
 void beeper (dsd_opts * opts, dsd_state * state, int lr, int id, int ad, int len);
 void dmr_gateway_identifier (uint32_t source, uint32_t target); //translate special addresses
+const char * dmr_mfid_name (int mfid);
 
 //Embedded Alias and GPS reports
 void dmr_talker_alias_lc_header (dsd_opts * opts, dsd_state * state, uint8_t slot, uint8_t * lc_bits);
 void dmr_talker_alias_lc_blocks (dsd_opts * opts, dsd_state * state, uint8_t slot, uint8_t block_num, uint8_t * lc_bits);
 void dmr_talker_alias_lc_decode (dsd_opts * opts, dsd_state * state, uint8_t slot, uint8_t block_num, uint8_t char_size, uint16_t end);
+void dmr_talker_alias_reset (dsd_state * state, uint8_t slot);
+void dmr_talker_alias_sync_source (dsd_state * state, uint8_t slot, uint32_t source);
+void p25_talker_alias_reset (dsd_state * state, uint8_t slot);
+void nxdn_talker_alias_reset (dsd_state * state);
+void nxdn_talker_alias_sync_source (dsd_state * state, uint32_t source);
 void apx_embedded_alias_test_phase1 (dsd_opts * opts, dsd_state * state);
 void apx_embedded_alias_header_phase1 (dsd_opts * opts, dsd_state * state, uint8_t slot, uint8_t * lc_bits);
 void apx_embedded_alias_header_phase2 (dsd_opts * opts, dsd_state * state, uint8_t slot, uint8_t * lc_bits);
@@ -1493,12 +1690,14 @@ char * getDateN(time_t t);
 char * getDateF(time_t t);
 
 //event history functions
+#define DMR_CC_GRANT_SRC 0x1000000U
 void init_event_history (Event_History_I * event_struct, uint8_t start, uint8_t stop);
 void push_event_history (Event_History_I * event_struct);
 void write_event_to_log_file (dsd_opts * opts, dsd_state * state, uint8_t slot, uint8_t swrite, char * event_string);
 void watchdog_event_history (dsd_opts * opts, dsd_state * state, uint8_t slot);
 void watchdog_event_current (dsd_opts * opts, dsd_state * state, uint8_t slot);
 void watchdog_event_datacall (dsd_opts * opts, dsd_state * state, uint32_t src, uint32_t dst, char * data_string, uint8_t slot);
+void dsd_set_call_string (dsd_state * state, uint8_t slot, const char * kind, const char * mod);
 
 //edacs AFS things
 int isCustomAfsString(dsd_state * state);
@@ -1605,6 +1804,7 @@ void rtl_udp_tune(dsd_opts * opts, dsd_state * state, long int frequency);
 
 long int GetCurrentFreq(int sockfd);
 bool SetFreq(int sockfd, long int freq);
+bool SetFreqNoFilter(int sockfd, long int freq);
 bool SetModulation(int sockfd, int bandwidth);
 //commands below unique to GQRX only, not usable on SDR++
 bool GetSignalLevel(int sockfd, double *dBFS);
@@ -1652,6 +1852,29 @@ int csvLCNImport(dsd_opts * opts, dsd_state * state);
 int csvChanImport(dsd_opts * opts, dsd_state * state);
 int csvKeyImportDec(dsd_opts * opts, dsd_state * state);
 int csvKeyImportHex(dsd_opts * opts, dsd_state * state);
+#ifdef __cplusplus
+extern "C" {
+#endif
+void trunk_init_access_code_lookup(dsd_opts * opts, dsd_state * state);
+void trunk_update_filter_for_freq(long int freq);
+void trunk_check_rigctl_freq(dsd_opts * opts, dsd_state * state);
+int trunk_is_stale_retune_burst(int cc);
+int trunk_is_imported_freq(dsd_state * state, long int freq);
+long int trunk_get_current_freq(dsd_opts * opts, dsd_state * state);
+void trunk_set_cc_freq_if_valid(dsd_opts * opts, dsd_state * state, long int freq);
+int trunk_is_cap_plus_cc_freq(long int freq);
+void trunk_clear_cap_plus_cc_freq(void);
+int trunk_get_t3_cc_lpcn(dsd_state * state);
+void trunk_set_t3_cc_lpcn(int lpcn);
+void trunk_set_t3_vc_lpcn(int lpcn);
+int trunk_get_t3_vc_lpcn(void);
+void trunk_set_cap_plus_cur_lsn(int lsn);
+void trunk_reset_dmr_channel_state(void);
+void trunk_get_dmr_channel_str(dsd_opts * opts, dsd_state * state, long int cur_freq, char * buf, size_t buf_sz);
+int trunk_is_dmr_slot_blocked(dsd_opts * opts, dsd_state * state, int slot);
+#ifdef __cplusplus
+}
+#endif
 
 //UDP Socket Connect and UDP Socket Blaster (audio output)
 int udp_socket_connect(dsd_opts * opts, dsd_state * state);

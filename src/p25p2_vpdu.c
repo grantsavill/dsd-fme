@@ -2361,10 +2361,7 @@ void process_MAC_VPDU(dsd_opts * opts, dsd_state * state, int type, unsigned lon
 			fprintf (stderr, " Group Voice");
 			state->gi[slot] = 0;
 
-			sprintf (state->call_string[slot], "   Group ");
-			if (svc & 0x80) strcat (state->call_string[slot], " Emergency  ");
-			else if (svc & 0x40) strcat (state->call_string[slot], " Encrypted  ");
-			else strcat (state->call_string[slot], "            ");
+			dsd_set_call_string (state, slot, "Group", (svc & 0x80) ? "Emergency" : (svc & 0x40) ? "Encrypted" : "");
 
 			if (MAC[1+len_a] == 0x21) fprintf (stderr, " - Extended ");
 			else fprintf (stderr, " - Abbreviated ");
@@ -2416,10 +2413,7 @@ void process_MAC_VPDU(dsd_opts * opts, dsd_state * state, int type, unsigned lon
 			fprintf (stderr, " Unit to Unit Voice");
 			state->gi[slot] = 1;
 
-			sprintf (state->call_string[slot], " Private ");
-			if (svc & 0x80) strcat (state->call_string[slot], " Emergency  ");
-			else if (svc & 0x40) strcat (state->call_string[slot], " Encrypted  ");
-			else strcat (state->call_string[slot], "            ");
+			dsd_set_call_string (state, slot, "Private", (svc & 0x80) ? "Emergency" : (svc & 0x40) ? "Encrypted" : "");
 
 			if (slot == 0)
 			{
@@ -2447,6 +2441,11 @@ void process_MAC_VPDU(dsd_opts * opts, dsd_state * state, int type, unsigned lon
 			UNUSED(sysclass);
 			fprintf (stderr, "\n Network Status Broadcast - Abbreviated \n");
 			fprintf (stderr, "  LRA [%02X] WACN [%05X] SYSID [%03X] NAC [%03X] CHAN-T [%04X]", lra, lwacn, lsysid, lcolorcode, channel);
+			if (opts->p25_nac_filter >= 0 && opts->p25_nac_filter <= 0xFFF && lcolorcode != opts->p25_nac_filter)
+			{
+				fprintf (stderr, " [NAC FILTER: %03X]", opts->p25_nac_filter);
+				goto END_PDU;
+			}
 			state->p25_cc_freq = process_channel_to_freq (opts, state, channel);
 			state->p25_cc_is_tdma = 1; //flag on for CC tuning purposes when system is qpsk
 			if (state->p2_hardset == 0 ) //state->p2_is_lcch == 1 shim until CRC is working, prevent bogus data
@@ -2477,6 +2476,11 @@ void process_MAC_VPDU(dsd_opts * opts, dsd_state * state, int type, unsigned lon
 			UNUSED(sysclass);
 			fprintf (stderr, "\n Network Status Broadcast - Extended \n");
 			fprintf (stderr, "  LRA [%02X] WACN [%05X] SYSID [%03X] NAC [%03X] CHAN-T [%04X] CHAN-R [%04X]", lra, lwacn, lsysid, lcolorcode, channelt, channelr);
+			if (opts->p25_nac_filter >= 0 && opts->p25_nac_filter <= 0xFFF && lcolorcode != opts->p25_nac_filter)
+			{
+				fprintf (stderr, " [NAC FILTER: %03X]", opts->p25_nac_filter);
+				goto END_PDU;
+			}
 			state->p25_cc_freq = process_channel_to_freq (opts, state, channelt);
 			process_channel_to_freq (opts, state, channelr);
 			state->p25_cc_is_tdma = 1; //flag on for CC tuning purposes when system is qpsk

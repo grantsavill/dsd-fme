@@ -49,6 +49,27 @@ printFrameSync (dsd_opts * opts, dsd_state * state, char *frametype, int offset,
 
 }
 
+static void
+dmr_update_sync_time (dsd_opts * opts, dsd_state * state)
+{
+  if (opts->dmr_cc_filter < 0 || opts->dmr_cc_filter > 15)
+  {
+    state->dmr_unconfirmed_sync = 0;
+    state->last_cc_sync_time = time(NULL);
+    return;
+  }
+  if (state->color_code_ok == 0 || (int)state->dmr_color_code == opts->dmr_cc_filter)
+  {
+    if (state->color_code_ok == 0 && state->dmr_unconfirmed_sync == 0)
+    {
+      state->dmr_unconfirmed_cc_sync_time = state->last_cc_sync_time;
+      state->dmr_unconfirmed_vc_sync_time = state->last_vc_sync_time;
+      state->dmr_unconfirmed_sync = 1;
+    }
+    state->last_cc_sync_time = time(NULL);
+  }
+}
+
 int
 getFrameSync (dsd_opts * opts, dsd_state * state)
 {
@@ -97,11 +118,51 @@ getFrameSync (dsd_opts * opts, dsd_state * state)
 
   //start control channel hunting if using trunking, time needs updating on each successful sync
   //will need to assign frequencies to a CC array for P25 since that isn't imported from CSV
-  if (state->dmr_rest_channel == -1 && opts->p25_is_tuned == 0 && opts->p25_trunk == 1 && ( (time(NULL) - state->last_cc_sync_time) > (opts->trunk_hangtime + 0) ) ) //was 3, go to hangtime value
+  static long int s_cc_retune_freq = 0;
+  static int      s_cc_retune_tried = 0;
+  static long int s_cc_retune_from_freq = 0;
+  static int      s_cc_is_cap_plus = 0;
+  if (state->p25_cc_freq != s_cc_retune_freq || state->p25_cc_freq == 0)
+  {
+    s_cc_retune_tried = 0;
+    s_cc_retune_from_freq = 0;
+    s_cc_is_cap_plus = 0;
+    s_cc_retune_freq = state->p25_cc_freq;
+  }
+  if (state->carrier == 1 || opts->p25_is_tuned == 1 || state->dmr_rest_channel != -1)
+  {
+    s_cc_retune_tried = 0;
+    s_cc_retune_from_freq = 0;
+  }
+  if (state->p25_cc_freq != 0)
+  {
+    if (state->dmr_rest_channel > 0 || strcmp(state->dmr_branding_sub, "Cap+ ") == 0 || trunk_is_cap_plus_cc_freq(state->p25_cc_freq))
+      s_cc_is_cap_plus = 1;
+    else if (state->dmr_t3_syscode != 0)
+    {
+      s_cc_is_cap_plus = 0;
+      trunk_clear_cap_plus_cc_freq();
+    }
+  }
+
+  int not_on_imported_cc = 0;
+  long int cur_cc_f = 0;
+  if (opts->p25_is_tuned == 0 && opts->p25_trunk == 1 && (state->lcn_freq_count > 0 || state->p25_cc_freq != 0))
+  {
+    cur_cc_f = trunk_get_current_freq(opts, state);
+    if (cur_cc_f > 0 && state->lcn_freq_count > 0 && !trunk_is_imported_freq(state, cur_cc_f))
+    {
+      not_on_imported_cc = 1;
+      state->dmr_rest_channel = -1;
+    }
+  }
+  time_t cc_wait_limit = (s_cc_retune_tried && s_cc_is_cap_plus) ? (opts->trunk_hangtime + 4) : opts->trunk_hangtime;
+  if (opts->p25_is_tuned == 0 && opts->p25_trunk == 1 &&
+      (not_on_imported_cc || (state->dmr_rest_channel == -1 && ((time(NULL) - state->last_cc_sync_time) > cc_wait_limit)))) //was 3, go to hangtime value
   {
 
     //if P25p2 VCH and going back to P25p1 CC, flip symbolrate
-    if (state->p25_cc_is_tdma == 0)
+    if (state->p25_cc_is_tdma == 0 && (opts->frame_p25p1 == 1 || opts->frame_p25p2 == 1))
     {
       state->samplesPerSymbol = 10;
       state->symbolCenter = 4;
@@ -110,49 +171,116 @@ getFrameSync (dsd_opts * opts, dsd_state * state)
       opts->slot2_on = 1;
     }
 
-    //start going through the lcn/frequencies CC/signal hunting
-    fprintf (stderr, "Control Channel Signal Lost. Searching for Control Channel.\n");
-    //make sure our current roll value doesn't exceed value of frequencies imported
-    if (state->lcn_freq_roll >= state->lcn_freq_count) //fixed this to skip the extra wait out at the end of the list
+    long int cur_freq = (cur_cc_f > 0) ? cur_cc_f : trunk_get_current_freq(opts, state);
+    long int live_f = 0;
+    if (opts->use_rigctl == 1 && opts->rigctl_sockfd != 0)
     {
-      state->lcn_freq_roll = 0; //reset to zero
+      live_f = GetCurrentFreq(opts->rigctl_sockfd);
+      if (live_f > 0)
+        cur_freq = live_f;
     }
-    //roll an extra value up if the current is the same as what's already loaded -- faster hunting on Cap+, etc
-    if (state->lcn_freq_roll != 0)
+    int on_cc_freq = (cur_freq > 0 && labs(cur_freq - state->p25_cc_freq) <= 500);
+    int need_retune = (!on_cc_freq && !(s_cc_retune_tried && cur_freq == s_cc_retune_from_freq));
+    int retry_rigctl_cc = (opts->use_rigctl == 1 && opts->rigctl_sockfd != 0 && !s_cc_retune_tried);
+    if (state->p25_cc_freq != 0 && (need_retune || retry_rigctl_cc))
     {
-      if (state->trunk_lcn_freq[state->lcn_freq_roll-1] == state->trunk_lcn_freq[state->lcn_freq_roll])
-      {
-        state->lcn_freq_roll++;
-        //check roll again if greater than expected, then go back to zero
-        if (state->lcn_freq_roll >= state->lcn_freq_count)
-        {
-          state->lcn_freq_roll = 0; //reset to zero
-        }
-      }
-    }
-    //check that we have a non zero value first, then tune next frequency
-    if (state->trunk_lcn_freq[state->lcn_freq_roll] != 0)
-    {
-      //rigctl
+      s_cc_retune_tried = 1;
+      s_cc_retune_freq = state->p25_cc_freq;
+      s_cc_retune_from_freq = cur_freq;
       if (opts->use_rigctl == 1)
       {
-        if (opts->setmod_bw != 0 )  SetModulation(opts->rigctl_sockfd, opts->setmod_bw);
-        SetFreq(opts->rigctl_sockfd, state->trunk_lcn_freq[state->lcn_freq_roll]);
+        if (opts->setmod_bw != 0 ) SetModulation(opts->rigctl_sockfd, opts->setmod_bw);
+        if (on_cc_freq)
+        {
+          SetFreqNoFilter(opts->rigctl_sockfd, state->p25_cc_freq + 12500);
+          usleep(50000);
+        }
+        SetFreq(opts->rigctl_sockfd, state->p25_cc_freq);
       }
-      //rtl
       if (opts->audio_in_type == 3)
       {
         #ifdef USE_RTLSDR
-        rtl_dev_tune (opts, state->trunk_lcn_freq[state->lcn_freq_roll]);
+        rtl_dev_tune (opts, state->p25_cc_freq);
         #endif
       }
-
-      fprintf (stderr, "Tuning to Frequency: %.06lf MHz\n",
-                (double)state->trunk_lcn_freq[state->lcn_freq_roll]/1000000);
-
+      fprintf (stderr, s_cc_is_cap_plus ? "Returning to Rest Channel: %.06lf MHz\n" : "Returning to Control Channel: %.06lf MHz\n",
+                (double)state->p25_cc_freq/1000000);
+      if (opts->frame_tetra == 1) { tetra_release_voice_slot(opts, state, 1); tetra_reset_state(state); }
+      state->last_cc_sync_time = time(NULL);
     }
-    state->lcn_freq_roll++;
-    state->last_cc_sync_time = time(NULL); //set again to give another x seconds
+    else if (state->lcn_freq_count > 0)
+    {
+      s_cc_retune_tried = 0;
+      s_cc_retune_from_freq = 0;
+      s_cc_is_cap_plus = 0;
+      trunk_clear_cap_plus_cc_freq();
+      s_cc_retune_freq = 0;
+      state->p25_cc_freq = 0;
+
+      //start going through the lcn/frequencies CC/signal hunting
+      fprintf (stderr, "Control Channel Signal Lost. Searching for Control Channel.\n");
+      //make sure our current roll value doesn't exceed value of frequencies imported
+      if (state->lcn_freq_roll >= state->lcn_freq_count) //fixed this to skip the extra wait out at the end of the list
+      {
+        state->lcn_freq_roll = 0; //reset to zero
+      }
+      //roll an extra value up if the current is the same as what's already loaded -- faster hunting on Cap+, etc
+      if (state->lcn_freq_roll != 0)
+      {
+        if (state->trunk_lcn_freq[state->lcn_freq_roll-1] == state->trunk_lcn_freq[state->lcn_freq_roll])
+        {
+          state->lcn_freq_roll++;
+          //check roll again if greater than expected, then go back to zero
+          if (state->lcn_freq_roll >= state->lcn_freq_count)
+          {
+            state->lcn_freq_roll = 0; //reset to zero
+          }
+        }
+      }
+      //if the next roll frequency is already the currently tuned frequency, advance to the next unique frequency
+      if (state->lcn_freq_count > 1)
+      {
+        if (cur_freq != 0 && state->trunk_lcn_freq[state->lcn_freq_roll] == cur_freq)
+        {
+          int guard = 0;
+          while (guard < state->lcn_freq_count && state->trunk_lcn_freq[state->lcn_freq_roll] == cur_freq)
+          {
+            state->lcn_freq_roll++;
+            if (state->lcn_freq_roll >= state->lcn_freq_count)
+              state->lcn_freq_roll = 0;
+            guard++;
+          }
+        }
+      }
+      //check that we have a non zero value first, then tune next frequency
+      if (state->trunk_lcn_freq[state->lcn_freq_roll] != 0)
+      {
+        //rigctl
+        if (opts->use_rigctl == 1)
+        {
+          if (opts->setmod_bw != 0 )  SetModulation(opts->rigctl_sockfd, opts->setmod_bw);
+          SetFreq(opts->rigctl_sockfd, state->trunk_lcn_freq[state->lcn_freq_roll]);
+        }
+        //rtl
+        if (opts->audio_in_type == 3)
+        {
+          #ifdef USE_RTLSDR
+          rtl_dev_tune (opts, state->trunk_lcn_freq[state->lcn_freq_roll]);
+          #endif
+        }
+
+        fprintf (stderr, "Tuning to Frequency: %.06lf MHz\n",
+                  (double)state->trunk_lcn_freq[state->lcn_freq_roll]/1000000);
+
+      }
+      if (opts->frame_tetra == 1) { tetra_release_voice_slot(opts, state, 1); tetra_reset_state(state); }
+      state->lcn_freq_roll++;
+      state->last_cc_sync_time = time(NULL); //set again to give another x seconds
+    }
+    else
+    {
+      state->last_cc_sync_time = time(NULL);
+    }
   }
 
   int i, t, dibit, sync, symbol, synctest_pos, lastt;
@@ -178,6 +306,10 @@ getFrameSync (dsd_opts * opts, dsd_state * state)
   else if (opts->frame_dpmr == 1)
   {
     t_max = 12; //based on Frame_Sync_2 pattern
+  }
+  else if (opts->frame_tetra == 1)
+  {
+    t_max = 11;
   }
   else if (opts->frame_m17 == 1)
   {
@@ -223,7 +355,7 @@ getFrameSync (dsd_opts * opts, dsd_state * state)
   state->numflips = 0;
 
   //run here as well
-  if (opts->use_ncurses_terminal == 1)
+  if (opts->use_ncurses_terminal == 1 && (opts->frame_tetra == 0 || (state->tetra_sym_count & 3) == 0))
     ncursesPrinter(opts, state);
 
   //slot 1
@@ -242,14 +374,34 @@ getFrameSync (dsd_opts * opts, dsd_state * state)
   while (sync == 0)
     {
 
+      if (opts->frame_aprs == 1 && aprs_check_sync(opts, state))
+        {
+          state->carrier = 1;
+          state->offset = synctest_pos;
+          sprintf(state->ftype, "APRS");
+          state->synctype = 44;
+          state->lastsynctype = 44;
+          return (44);
+        }
+
       t++;
 
       //run ncurses printer more frequently when no sync to speed up responsiveness of it during no sync period
       //NOTE: Need to monitor and test this, if responsiveness issues arise, then disable this
-      if ( opts->use_ncurses_terminal == 1 && ((t % 300) == 0)) //t maxes out at 1800 (6 times each getFrameSync)
+      if ( opts->use_ncurses_terminal == 1 && ((t % (opts->frame_tetra ? 1500 : 300)) == 0)) //t maxes out at 1800 (6 times each getFrameSync)
         ncursesPrinter(opts, state);
 
       symbol = getSymbol (opts, state, 0);
+
+      if (opts->frame_aprs == 1 && aprs_check_sync(opts, state))
+        {
+          state->carrier = 1;
+          state->offset = synctest_pos;
+          sprintf(state->ftype, "APRS");
+          state->synctype = 44;
+          state->lastsynctype = 44;
+          return (44);
+        }
 
       lbuf[lidx] = symbol;
       state->sbuf[state->sidx] = symbol;
@@ -339,10 +491,19 @@ getFrameSync (dsd_opts * opts, dsd_state * state)
 
       if (state->dmr_payload_p > state->dmr_payload_buf + 900000)
       {
+       memcpy(state->dmr_payload_buf, state->dmr_payload_p - 200, 200 * sizeof(int));
        state->dmr_payload_p = state->dmr_payload_buf + 200;
       }
 
-      if (1 == 1)
+      if (opts->audio_in_type == 4)
+      {
+        *state->dmr_payload_p = state->symbolc;
+      }
+      else if (opts->frame_tetra == 1)
+      {
+        *state->dmr_payload_p = symbol;
+      }
+      else if (1 == 1)
       {
         if (symbol > state->center)
         {
@@ -432,6 +593,8 @@ getFrameSync (dsd_opts * opts, dsd_state * state)
                 }
               state->max = lsum / opts->msize;
               state->center = ((state->max) + (state->min)) / 2;
+              state->umid = (((state->max) - state->center) * 5 / 8) + state->center;
+              state->lmid = (((state->min) - state->center) * 5 / 8) + state->center;
               state->maxref = (int)((state->max) * 0.80F);
               state->minref = (int)((state->min) * 0.80F);
             }
@@ -448,6 +611,19 @@ getFrameSync (dsd_opts * opts, dsd_state * state)
             if (opts->frame_nxdn48 == 1 || opts->frame_nxdn96 == 1 || opts->frame_dpmr == 1 || opts->frame_m17 == 1)
             {
               goto SYNC_TEST_END;
+            }
+          }
+
+          if (opts->frame_tetra == 1)
+          {
+            int tetra_st = tetra_check_sync(opts, state);
+            if (tetra_st != -1)
+            {
+              state->offset = synctest_pos;
+              sprintf(state->ftype, "TETRA");
+              state->synctype = tetra_st;
+              state->lastsynctype = tetra_st;
+              return (tetra_st);
             }
           }
 
@@ -469,7 +645,9 @@ getFrameSync (dsd_opts * opts, dsd_state * state)
                       printFrameSync (opts, state, "+P25p1", synctest_pos + 1, modulation);
                     }
                   state->lastsynctype = 0;
-                  state->last_cc_sync_time = time(NULL);
+                  if (opts->p25_nac_filter < 0 || opts->p25_nac_filter > 0xFFF ||
+                      state->nac == 0 || (int)state->nac == opts->p25_nac_filter)
+                    state->last_cc_sync_time = time(NULL);
                   return (0);
                 }
               if (strcmp (synctest, INV_P25P1_SYNC) == 0)
@@ -487,7 +665,9 @@ getFrameSync (dsd_opts * opts, dsd_state * state)
                       printFrameSync (opts, state, "-P25p1 ", synctest_pos + 1, modulation);
                     }
                   state->lastsynctype = 1;
-                  state->last_cc_sync_time = time(NULL);
+                  if (opts->p25_nac_filter < 0 || opts->p25_nac_filter > 0xFFF ||
+                      state->nac == 0 || (int)state->nac == opts->p25_nac_filter)
+                    state->last_cc_sync_time = time(NULL);
                   return (1);
                 }
             }
@@ -639,7 +819,9 @@ getFrameSync (dsd_opts * opts, dsd_state * state)
             			fprintf (stderr, " P2 Missing Parameters            ");
             			fprintf (stderr, "%s", KNRM);
             		}
-                state->last_cc_sync_time = time(NULL);
+                if (opts->p25_nac_filter < 0 || opts->p25_nac_filter > 0xFFF ||
+                    state->p2_cc == 0 || (int)state->p2_cc == opts->p25_nac_filter)
+                  state->last_cc_sync_time = time(NULL);
                 return (35); //35
               }
             }
@@ -672,7 +854,9 @@ getFrameSync (dsd_opts * opts, dsd_state * state)
             		}
 
                 state->lastsynctype = 36; //36
-                state->last_cc_sync_time = time(NULL);
+                if (opts->p25_nac_filter < 0 || opts->p25_nac_filter > 0xFFF ||
+                    state->p2_cc == 0 || (int)state->p2_cc == opts->p25_nac_filter)
+                  state->last_cc_sync_time = time(NULL);
                 return (36); //36
               }
             }
@@ -773,12 +957,14 @@ getFrameSync (dsd_opts * opts, dsd_state * state)
                   //state->firstframe = 1;
                 }
                 state->lastsynctype = 33; //33
+                dmr_update_sync_time (opts, state);
                 return (33); //33
               }
               else //inverted MS voice frame
               {
                 sprintf(state->ftype, "DMR MS");
                 state->lastsynctype = 32;
+                dmr_update_sync_time (opts, state);
                 return (32);
               }
             }
@@ -804,12 +990,14 @@ getFrameSync (dsd_opts * opts, dsd_state * state)
                   //state->firstframe = 1;
                 }
                 state->lastsynctype = 32;
+                dmr_update_sync_time (opts, state);
                 return (32);
               }
               else //inverted MS data frame
               {
                 sprintf(state->ftype, "DMR MS");
                 state->lastsynctype = 33;
+                dmr_update_sync_time (opts, state);
                 return (33);
               }
 
@@ -818,10 +1006,29 @@ getFrameSync (dsd_opts * opts, dsd_state * state)
             //if ((strcmp (synctest, DMR_MS_DATA_SYNC) == 0) || (strcmp (synctest, DMR_BS_DATA_SYNC) == 0))
             if (strcmp (synctest, DMR_BS_DATA_SYNC) == 0)
             {
+              int update_slicer = 1;
+              if (opts->dmr_cc_filter >= 0 && opts->dmr_cc_filter <= 15)
+              {
+                if (opts->inverted_dmr == 0)
+                {
+                  int d0 = *(state->dmr_payload_p - 29);
+                  int d1 = *(state->dmr_payload_p - 28);
+                  int raw_cc = ((d0 & 3) << 2) | (d1 & 3);
+                  if (raw_cc != opts->dmr_cc_filter)
+                    update_slicer = 0;
+                }
+                else if (state->color_code_ok == 1 && (int)state->color_code != opts->dmr_cc_filter)
+                {
+                  update_slicer = 0;
+                }
+              }
               state->carrier = 1;
               state->offset = synctest_pos;
-              state->max = ((state->max) + (lmax)) / 2;
-              state->min = ((state->min) + (lmin)) / 2;
+              if (update_slicer)
+              {
+                state->max = ((state->max) + (lmax)) / 2;
+                state->min = ((state->min) + (lmin)) / 2;
+              }
               state->directmode = 0;
               if (opts->inverted_dmr == 0)
               {
@@ -829,10 +1036,10 @@ getFrameSync (dsd_opts * opts, dsd_state * state)
                 sprintf(state->ftype, "DMR ");
                 if (opts->errorbars == 1)
                 {
-                  printFrameSync (opts, state, "+DMR ", synctest_pos + 1, modulation);
+                  //printFrameSync (opts, state, "+DMR ", synctest_pos + 1, modulation);
                 }
                 state->lastsynctype = 10;
-                state->last_cc_sync_time = time(NULL);
+                dmr_update_sync_time (opts, state);
                 return (10);
               }
               else
@@ -848,7 +1055,7 @@ getFrameSync (dsd_opts * opts, dsd_state * state)
                   state->firstframe = 1;
                 }
                 state->lastsynctype = 11;
-                state->last_cc_sync_time = time(NULL);
+                dmr_update_sync_time (opts, state);
                 return (11); //11
               }
             }
@@ -869,7 +1076,7 @@ getFrameSync (dsd_opts * opts, dsd_state * state)
                   //printFrameSync (opts, state, "+DMR ", synctest_pos + 1, modulation);
                 }
                 state->lastsynctype = 33;
-                state->last_cc_sync_time = time(NULL);
+                dmr_update_sync_time (opts, state);
                 return (33);
               }
               else
@@ -885,7 +1092,7 @@ getFrameSync (dsd_opts * opts, dsd_state * state)
                   state->firstframe = 1;
                 }
                 state->lastsynctype = 32;
-                state->last_cc_sync_time = time(NULL);
+                dmr_update_sync_time (opts, state);
                 return (32);
               }
             } /* End if(strcmp (synctest, DMR_DIRECT_MODE_TS1_DATA_SYNC) == 0) */
@@ -906,7 +1113,7 @@ getFrameSync (dsd_opts * opts, dsd_state * state)
                   //printFrameSync (opts, state, "+DMR ", synctest_pos + 1, modulation);
                 }
                 state->lastsynctype = 33;
-                state->last_cc_sync_time = time(NULL);
+                dmr_update_sync_time (opts, state);
                 return (33);
               }
               else
@@ -922,17 +1129,37 @@ getFrameSync (dsd_opts * opts, dsd_state * state)
                   state->firstframe = 1;
                 }
                 state->lastsynctype = 32;
-                state->last_cc_sync_time = time(NULL);
+                dmr_update_sync_time (opts, state);
                 return (32);
               }
             } /* End if(strcmp (synctest, DMR_DIRECT_MODE_TS2_DATA_SYNC) == 0) */
             //if((strcmp (synctest, DMR_MS_VOICE_SYNC) == 0) || (strcmp (synctest, DMR_BS_VOICE_SYNC) == 0))
             if(strcmp (synctest, DMR_BS_VOICE_SYNC) == 0)
             {
+              int update_slicer = 1;
+              if (opts->dmr_cc_filter >= 0 && opts->dmr_cc_filter <= 15)
+              {
+                if (opts->inverted_dmr == 0)
+                {
+                  if (state->color_code_ok == 1 && (int)state->color_code != opts->dmr_cc_filter)
+                    update_slicer = 0;
+                }
+                else
+                {
+                  int d0 = (*(state->dmr_payload_p - 29)) ^ 2;
+                  int d1 = (*(state->dmr_payload_p - 28)) ^ 2;
+                  int raw_cc = ((d0 & 3) << 2) | (d1 & 3);
+                  if (raw_cc != opts->dmr_cc_filter)
+                    update_slicer = 0;
+                }
+              }
               state->carrier = 1;
               state->offset = synctest_pos;
-              state->max = ((state->max) + lmax) / 2;
-              state->min = ((state->min) + lmin) / 2;
+              if (update_slicer)
+              {
+                state->max = ((state->max) + lmax) / 2;
+                state->min = ((state->min) + lmin) / 2;
+              }
               state->directmode = 0;
               if (opts->inverted_dmr == 0)
               {
@@ -947,7 +1174,7 @@ getFrameSync (dsd_opts * opts, dsd_state * state)
                   state->firstframe = 1;
                 }
                 state->lastsynctype = 12;
-                state->last_cc_sync_time = time(NULL);
+                dmr_update_sync_time (opts, state);
                 return (12);
               }
 
@@ -957,10 +1184,10 @@ getFrameSync (dsd_opts * opts, dsd_state * state)
                 sprintf(state->ftype, "DMR ");
                 if (opts->errorbars == 1) //&& opts->dmr_stereo == 0
                 {
-                  printFrameSync (opts, state, "-DMR ", synctest_pos + 1, modulation);
+                  //printFrameSync (opts, state, "-DMR ", synctest_pos + 1, modulation);
                 }
                 state->lastsynctype = 13;
-                state->last_cc_sync_time = time(NULL);
+                dmr_update_sync_time (opts, state);
                 return (13);
               }
             }
@@ -985,7 +1212,7 @@ getFrameSync (dsd_opts * opts, dsd_state * state)
                   state->firstframe = 1;
                 }
                 state->lastsynctype = 32;
-                state->last_cc_sync_time = time(NULL);
+                dmr_update_sync_time (opts, state);
                 return (32); //treat Direct Mode same as MS mode for now
               }
               else
@@ -997,6 +1224,7 @@ getFrameSync (dsd_opts * opts, dsd_state * state)
                   //printFrameSync (opts, state, "-DMR ", synctest_pos + 1, modulation);
                 }
                 state->lastsynctype = 33;
+                dmr_update_sync_time (opts, state);
                 return (33);
               }
             } /* End if(strcmp (synctest, DMR_DIRECT_MODE_TS1_VOICE_SYNC) == 0) */
@@ -1021,7 +1249,7 @@ getFrameSync (dsd_opts * opts, dsd_state * state)
                   state->firstframe = 1;
                 }
                 state->lastsynctype = 32;
-                state->last_cc_sync_time = time(NULL);
+                dmr_update_sync_time (opts, state);
                 return (32);
               }
               else
@@ -1033,7 +1261,7 @@ getFrameSync (dsd_opts * opts, dsd_state * state)
                   //printFrameSync (opts, state, "-DMR ", synctest_pos + 1, modulation);
                 }
                 state->lastsynctype = 33;
-                state->last_cc_sync_time = time(NULL);
+                dmr_update_sync_time (opts, state);
                 return (33);
               }
             } //End if(strcmp (synctest, DMR_DIRECT_MODE_TS2_VOICE_SYNC) == 0)
@@ -1188,7 +1416,9 @@ getFrameSync (dsd_opts * opts, dsd_state * state)
                 state->offset = synctest_pos;
                 state->max = ((state->max) + lmax) / 2;
                 state->min = ((state->min) + lmin) / 2;
-                state->last_cc_sync_time = time(NULL);
+                if (opts->nxdn_ran_filter < 0 || opts->nxdn_ran_filter > 63 ||
+                    (int)state->nxdn_last_ran < 0 || (int)state->nxdn_last_ran == opts->nxdn_ran_filter)
+                  state->last_cc_sync_time = time(NULL);
                 return (28);
               }
               state->lastsynctype = 28;
@@ -1213,7 +1443,9 @@ getFrameSync (dsd_opts * opts, dsd_state * state)
                 state->offset = synctest_pos;
                 state->max = ((state->max) + lmax) / 2;
                 state->min = ((state->min) + lmin) / 2;
-                state->last_cc_sync_time = time(NULL);
+                if (opts->nxdn_ran_filter < 0 || opts->nxdn_ran_filter > 63 ||
+                    (int)state->nxdn_last_ran < 0 || (int)state->nxdn_last_ran == opts->nxdn_ran_filter)
+                  state->last_cc_sync_time = time(NULL);
                 return (29);
               }
               state->lastsynctype = 29;
@@ -1243,7 +1475,9 @@ getFrameSync (dsd_opts * opts, dsd_state * state)
 
               if (state->lastsynctype == 28)
               {
-                state->last_cc_sync_time = time(NULL);
+                if (opts->nxdn_ran_filter < 0 || opts->nxdn_ran_filter > 63 ||
+                    (int)state->nxdn_last_ran < 0 || (int)state->nxdn_last_ran == opts->nxdn_ran_filter)
+                  state->last_cc_sync_time = time(NULL);
                 return (28);
               }
               state->lastsynctype = 28;
@@ -1273,7 +1507,9 @@ getFrameSync (dsd_opts * opts, dsd_state * state)
 
               if (state->lastsynctype == 29)
               {
-                state->last_cc_sync_time = time(NULL);
+                if (opts->nxdn_ran_filter < 0 || opts->nxdn_ran_filter > 63 ||
+                    (int)state->nxdn_last_ran < 0 || (int)state->nxdn_last_ran == opts->nxdn_ran_filter)
+                  state->last_cc_sync_time = time(NULL);
                 return (29);
               }
               state->lastsynctype = 29;
@@ -1396,7 +1632,7 @@ getFrameSync (dsd_opts * opts, dsd_state * state)
       if (state->lastsynctype != 1)
         {
 
-          if (synctest_pos >= 1800)
+          if (synctest_pos >= (opts->frame_tetra ? 4500 : 1800))
             {
               if ((opts->errorbars == 1) && (opts->verbose > 1) && (state->carrier == 1))
                 {

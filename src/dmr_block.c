@@ -182,14 +182,17 @@ void dmr_dheader (dsd_opts * opts, dsd_state * state, uint8_t dheader[], uint8_t
     //mfid string handling
     if (dpf == 15)
     {
-      if      (p_mfid == 0x10) sprintf (mfid_string, "%s", "Moto"); //could just also be a generic catch all for DMRA
-      else if (p_mfid == 0x58) sprintf (mfid_string, "%s", "Tait");
-      else if (p_mfid == 0x68) sprintf (mfid_string, "%s", "Hytera");
-      else if (p_mfid == 0x08) sprintf (mfid_string, "%s", "Hytera");
-      else if (p_mfid == 0x06) sprintf (mfid_string, "%s", "Trid/Mot");
-      else if (p_mfid == 0x77) sprintf (mfid_string, "%s", "VTX STD");
-      else if (p_mfid == 0x00) sprintf (mfid_string, "%s", "Standard");
-      else                     sprintf (mfid_string, "%s", "Other");
+      const char * name = dmr_mfid_name(p_mfid);
+      if (p_mfid == 0x00)
+        snprintf (mfid_string, sizeof(mfid_string), "%s", "Standard");
+      else if (p_mfid == 0x06)
+        snprintf (mfid_string, sizeof(mfid_string), "%s", "Trid/Mot");
+      else if (name != NULL)
+        snprintf (mfid_string, sizeof(mfid_string), "%s", name);
+      else
+        snprintf (mfid_string, sizeof(mfid_string), "%s", "Other");
+      if (p_mfid != 0)
+        state->dmr_mfid = p_mfid;
     }
 
     //udt format string handling
@@ -544,7 +547,11 @@ void dmr_dheader (dsd_opts * opts, dsd_state * state, uint8_t dheader[], uint8_t
     //3 or 4 seems to be the average safe value
     if (state->data_header_blocks[slot] < 1) state->data_header_blocks[slot] = 1; //
     //set data header validity unless its a p_head (should be set prior, if received)
-    if (dpf != 15) state->data_header_valid[slot] = 1;
+    if (dpf != 15)
+    {
+      state->data_header_valid[slot] = 1;
+      dmr_talker_alias_reset(state, slot);
+    }
 
     if (dpf != 1 && dpf != 15)
     {

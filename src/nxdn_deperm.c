@@ -139,8 +139,7 @@ void nxdn_message_type (dsd_opts * opts, dsd_state * state, uint8_t MessageType)
 	//Zero out stale values on DISC or TX_REL only (IDLE messaages occur often on NXDN96 VCH, and randomly on Type-C FACCH1 steals for some reason)
 	if (MessageType == 0x08 || MessageType == 0x11)
 	{
-		memset (state->generic_talker_alias[0], 0, sizeof(state->generic_talker_alias[0]));
-		sprintf (state->generic_talker_alias[0], "%s", "");
+		nxdn_talker_alias_reset (state);
 		state->nxdn_last_rid = 0;
 		state->nxdn_last_tg = 0;
 		state->nxdn_cipher_type = 0; //force will reactivate it if needed during voice tx

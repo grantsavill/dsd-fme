@@ -106,20 +106,50 @@ endif ()
 include(git_revision)
 git_describe(GIT_TAG)
 
+set(GIT_HEAD_SHA "")
+set(GIT_UPSTREAM_SHA "")
+if(GIT_EXECUTABLE)
+    execute_process(
+        COMMAND "${GIT_EXECUTABLE}" rev-parse HEAD
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        OUTPUT_VARIABLE GIT_HEAD_SHA
+        ERROR_QUIET
+        OUTPUT_STRIP_TRAILING_WHITESPACE)
+    execute_process(
+        COMMAND "${GIT_EXECUTABLE}" merge-base HEAD upstream/audio_work
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        RESULT_VARIABLE _git_up_res
+        OUTPUT_VARIABLE GIT_UPSTREAM_SHA
+        ERROR_QUIET
+        OUTPUT_STRIP_TRAILING_WHITESPACE)
+    if(NOT _git_up_res EQUAL 0 OR NOT GIT_UPSTREAM_SHA)
+        execute_process(
+            COMMAND "${GIT_EXECUTABLE}" merge-base HEAD origin/audio_work
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+            RESULT_VARIABLE _git_up_res
+            OUTPUT_VARIABLE GIT_UPSTREAM_SHA
+            ERROR_QUIET
+            OUTPUT_STRIP_TRAILING_WHITESPACE)
+    endif()
+    if(NOT _git_up_res EQUAL 0 OR NOT GIT_UPSTREAM_SHA)
+        set(GIT_UPSTREAM_SHA "${GIT_HEAD_SHA}")
+    endif()
+endif()
+
 find_package(LibSndFile REQUIRED)
 find_package(MBE REQUIRED)
 find_package(RTLSDR)
 find_package(Curses REQUIRED)
 find_package(PulseAudio REQUIRED)
 find_package(CODEC2)
+find_package(Threads)
 
 include_directories(SYSTEM ${LIBSNDFILE_INCLUDE_DIR} ${MBE_INCLUDE_DIR} ${PULSEAUDIO_INCLUDE_DIRS} ${CURSES_INCLUDE_DIRS})
-set(LIBS ${MBE_LIBRARY} ${LIBSNDFILE_LIBRARY} ${PULSEAUDIO_SIMPLE_LIBRARY} ${PULSEAUDIO_LIBRARY} ${CURSES_LIBRARIES})
+set(LIBS ${MBE_LIBRARY} ${LIBSNDFILE_LIBRARY} ${PULSEAUDIO_SIMPLE_LIBRARY} ${PULSEAUDIO_LIBRARY} ${CURSES_LIBRARIES} ${CMAKE_THREAD_LIBS_INIT})
 
 if(RTLSDR_FOUND)
-    find_package(Threads)
     include_directories(SYSTEM ${RTLSDR_INCLUDE_DIRS})
-    list(APPEND LIBS ${RTLSDR_LIBRARIES} ${CMAKE_THREAD_LIBS_INIT})
+    list(APPEND LIBS ${RTLSDR_LIBRARIES})
     add_definitions(-DUSE_RTLSDR)
 endif(RTLSDR_FOUND)
 

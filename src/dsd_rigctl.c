@@ -12,6 +12,7 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <netdb.h>
 
 //UDP Specific
@@ -74,6 +75,9 @@ int Connect (char *hostname, int portno)
         return (0);
     }
 
+    int nodelay = 1;
+    setsockopt(sockfd, IPPROTO_TCP, TCP_NODELAY, (const void *)&nodelay, sizeof(nodelay));
+
     return sockfd;
 }
 //
@@ -126,7 +130,7 @@ long int GetCurrentFreq(int sockfd)
     return freq;
 }
 
-bool SetFreq(int sockfd, long int freq)
+bool SetFreqNoFilter(int sockfd, long int freq)
 {
     char buf[BUFSIZE];
 
@@ -138,6 +142,13 @@ bool SetFreq(int sockfd, long int freq)
         return false;
 
     return true;
+}
+
+bool SetFreq(int sockfd, long int freq)
+{
+    bool ok = SetFreqNoFilter(sockfd, freq);
+    trunk_update_filter_for_freq(freq);
+    return ok;
 }
 
 bool SetModulation(int sockfd, int bandwidth)
@@ -426,7 +437,7 @@ void return_to_cc (dsd_opts * opts, dsd_state * state)
     memset (state->nxdn_sacch_frame_segment, 1, sizeof(state->nxdn_sacch_frame_segment));
     memset (state->nxdn_sacch_frame_segcrc, 1, sizeof(state->nxdn_sacch_frame_segcrc));
 
-    memset (state->active_channel, 0, sizeof(state->active_channel));
+    dmr_active_channel_clear (state);
 
     //reset dmr blocks
     dmr_reset_blocks (opts, state);
@@ -436,8 +447,18 @@ void return_to_cc (dsd_opts * opts, dsd_state * state)
     state->lasttgR = 0;
     state->lastsrc = 0;
     state->lastsrcR = 0;
+    state->dmr_bcast_tg[0] = state->dmr_bcast_tg[1] = 0;
+    state->dmr_hangtime[0] = state->dmr_hangtime[1] = 0;
+    state->dmr_so = 0;
+    state->dmr_soR = 0;
+    state->dmr_fid = 0;
+    state->dmr_fidR = 0;
+    ambe_hw_reset_call(0);
+    ambe_hw_reset_call(1);
     state->gi[0] = -1;
     state->gi[1] = -1;
+    sprintf (state->call_string[0], "%s", "                     "); //21 spaces
+    sprintf (state->call_string[1], "%s", "                     "); //21 spaces
     state->payload_algid = 0;
     state->payload_algidR = 0;
     state->payload_keyid = 0;

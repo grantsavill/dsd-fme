@@ -237,12 +237,9 @@ void dmr_data_burst_handler(dsd_opts * opts, dsd_state * state, uint8_t info[196
 
   if (databurst != 0xEB)
   {
-    if (state->dmr_ms_mode == 0)
-    {
-      if (state->dmr_color_code != 16)
-        fprintf(stderr, "| Color Code=%02d ", state->dmr_color_code);
-      else fprintf(stderr, "| Color Code=XX ");
-    }
+    if (state->dmr_color_code != 16)
+      fprintf(stderr, "| Color Code=%02d ", state->dmr_color_code);
+    else fprintf(stderr, "| Color Code=XX ");
     fprintf(stderr, "|%s", state->fsubtype);
 
     //'DSP' output to file
@@ -708,7 +705,62 @@ void dmr_data_burst_handler(dsd_opts * opts, dsd_state * state, uint8_t info[196
   if (databurst == 0x07 && is_udt == 1) dmr_block_assembler (opts, state, DMR_PDU, pdu_len, databurst, 3); //UDT with 1/2 Rate Encoding
 
   //control signalling types (CSBK, MBC)
-  if (databurst == 0x03) dmr_cspdu (opts, state, DMR_PDU_bits, DMR_PDU, CRCCorrect, IrrecoverableErrors);
+  if (databurst == 0x03)
+  {
+    uint8_t csbk_o = DMR_PDU[0] & 0x3F;
+    uint8_t csbk_fid = DMR_PDU[1];
+    uint8_t is_pclear = (IrrecoverableErrors == 0 && CRCCorrect == 1 && (DMR_PDU[0] & 0x40) == 0 &&
+                         (csbk_o == 46 || (csbk_fid == 0x06 && csbk_o == 0x0C)));
+    uint8_t is_pprotect = (IrrecoverableErrors == 0 && CRCCorrect == 1 && (DMR_PDU[0] & 0x40) == 0 &&
+                           csbk_fid == 0 && csbk_o == 47);
+    if (IrrecoverableErrors == 0 && CRCCorrect == 1 && !is_pclear && !is_pprotect)
+    {
+      if (slot == 0)
+      {
+        state->lasttg = 0;
+        state->lastsrc = 0;
+        state->dmr_so = 0;
+        state->dmr_fid = 0;
+      }
+      else if (slot == 1)
+      {
+        state->lasttgR = 0;
+        state->lastsrcR = 0;
+        state->dmr_soR = 0;
+        state->dmr_fidR = 0;
+      }
+      state->dmr_hangtime[slot] = 0;
+      state->dmr_bcast_tg[slot] = 0;
+      dmr_talker_alias_reset(state, slot);
+      sprintf (state->call_string[slot], "%s", "                     "); //21 spaces
+      state->gi[slot] = -1;
+      ambe_hw_reset_call(slot);
+    }
+    dmr_cspdu (opts, state, DMR_PDU_bits, DMR_PDU, CRCCorrect, IrrecoverableErrors);
+    if (is_pclear)
+    {
+      if (slot == 0)
+      {
+        state->lasttg = 0;
+        state->lastsrc = 0;
+        state->dmr_so = 0;
+        state->dmr_fid = 0;
+      }
+      else if (slot == 1)
+      {
+        state->lasttgR = 0;
+        state->lastsrcR = 0;
+        state->dmr_soR = 0;
+        state->dmr_fidR = 0;
+      }
+      state->dmr_hangtime[slot] = 0;
+      state->dmr_bcast_tg[slot] = 0;
+      dmr_talker_alias_reset(state, slot);
+      sprintf (state->call_string[slot], "%s", "                     "); //21 spaces
+      state->gi[slot] = -1;
+      ambe_hw_reset_call(slot);
+    }
+  }
 
   //both MBC header and MBC continuation will go to the block_assembler - type 2, and then to dmr_cspdu
   if (databurst == 0x04)
@@ -746,13 +798,13 @@ void dmr_data_burst_handler(dsd_opts * opts, dsd_state * state, uint8_t info[196
   if (IrrecoverableErrors == 0 && is_ras == 1 && (is_bptc || is_emb) && databurst != 0x05 && databurst != 0x07)
   {
     fprintf (stderr, "%s", KRED);
-    fprintf (stderr, " {RAS ");
+    fprintf (stderr, " [RAS ");
     if (state->ras_effective_key != 0 && CRCComputed != CRCExtracted)
-      fprintf (stderr, "Fail} ");
+      fprintf (stderr, "Fail] ");
     else if (state->ras_effective_key != 0 && CRCComputed == CRCExtracted)
-      fprintf (stderr, "Okay} ");
+      fprintf (stderr, "Okay] ");
     else if (state->ras_effective_key == 0)
-      fprintf (stderr, "Skip} ");
+      fprintf (stderr, "Skip] ");
     fprintf (stderr, "%s", KNRM);
   }
 

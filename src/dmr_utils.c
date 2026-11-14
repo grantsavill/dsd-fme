@@ -479,3 +479,32 @@ uint32_t ComputeCrc32BitV(uint8_t * DMRData, uint32_t NbData)
   return CRC;
 } /* End ComputeCrc32BitV() */
 
+// Return the vendor name for an ETSI DMR Manufacturer/Feature Set ID (MFID/FID).
+const char * dmr_mfid_name (int mfid)
+{
+  switch (mfid)
+  {
+    case 0x04: return "Fylde Micro";
+    case 0x05: return "PROD-EL SPA";
+    case 0x06: return "Motorola";
+    case 0x07: return "RADIODATA";
+    case 0x08: return "Hytera";
+    case 0x09: return "ASELSAN";
+    case 0x0A: return "Kirisun";
+    case 0x0B: return "DMR Association";
+    case 0x0C: return "Sepura";
+    case 0x10: return "Motorola";
+    case 0x13:
+    case 0x1C: return "EMC S.P.A.";
+    case 0x20: return "JVC Kenwood";
+    case 0x33:
+    case 0x3C: return "Radio Activity";
+    case 0x58: return "Tait";
+    case 0x68: return "Hytera";
+    case 0x77: return "Vertex Standard";
+    case 0x78: return "Simoco";
+    case 0x88: return "Hytera";
+    default:   return NULL;
+  }
+}
+

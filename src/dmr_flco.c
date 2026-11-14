@@ -14,7 +14,6 @@
 //combined flco handler (vlc, tlc, emb), minus the superfluous structs and strings
 void dmr_flco (dsd_opts * opts, dsd_state * state, uint8_t lc_bits[], uint32_t CRCCorrect, uint32_t * IrrecoverableErrors, uint8_t type)
 {
-  UNUSED(CRCCorrect);
 
   //force slot to 0 if using dmr mono handling
   if (opts->dmr_mono == 1) state->currentslot = 0;
@@ -67,6 +66,8 @@ void dmr_flco (dsd_opts * opts, dsd_state * state, uint8_t lc_bits[], uint32_t C
     //NOTE: bit counter reset is handled after vc6 voice now
 
     is_kenwood_sc = 1;
+    if (type != 3)
+      state->dmr_mfid = 0x20;
 
     //if forcing a keystream, flip the encryption bit for this to unmute
     if (state->ken_sc == 1)
@@ -148,7 +149,9 @@ void dmr_flco (dsd_opts * opts, dsd_state * state, uint8_t lc_bits[], uint32_t C
   //read ahead a little to get this for the xpt flag
   if (*IrrecoverableErrors == 0 && flco == 0x09 && fid == 0x68)
   {
-    sprintf (state->dmr_branding, "%s", "  Hytera");
+    if (CRCCorrect == 1 && type != 3)
+      state->dmr_mfid = 0x68;
+    sprintf (state->dmr_branding, "%s", "Hytera");
     sprintf (state->dmr_branding_sub, "XPT ");
   }
 
@@ -175,11 +178,20 @@ void dmr_flco (dsd_opts * opts, dsd_state * state, uint8_t lc_bits[], uint32_t C
     goto END_FLCO;
   }
 
-  if (*IrrecoverableErrors == 0)
+  //Null Embedded Message (ETSI TS 102 361-1 7.1.2): ignore so we don't clobber active call state
+  if (type == 3 && flco == 0 && fid == 0 && so == 0 && target == 0 && source == 0)
+  {
+    goto END_FLCO;
+  }
+
+  if (*IrrecoverableErrors == 0 && CRCCorrect == 1)
   {
 
     if (slot == 0) state->dmr_flco = flco;
     else state->dmr_flcoR = flco;
+    //only latch generic dmr_mfid from strongly-checked full LC (VLC/TLC), not noisy 5-bit CRC EMB bursts
+    if (type != 3 && fid != 0 && pf == 0 && !is_kenwood_sc)
+      state->dmr_mfid = fid;
 
     //debug output for potential RAS indicators on Moto Systems during EMB (0x2X and 0x1X indicators)
     //TODO: Either leave handling of link control as is, or rework entire file to handle all the exceptions
@@ -221,16 +233,16 @@ void dmr_flco (dsd_opts * opts, dsd_state * state, uint8_t lc_bits[], uint32_t C
       dmr_embedded_gps(opts, state, lc_bits);
     }
 
-    //look for Cap+ on VLC header, then set source and/or rest channel appropriately
-    if (type == 1 && fid == 0x10 && (flco == 0x04 || flco == 0x07) ) //0x07 appears to be a cap+ txi private call
+    //look for Cap+ on VLC, TLC, or EMB, then set source and/or rest channel appropriately
+    if (fid == 0x10 && ((flco & 0x1F) == 0x04 || (flco & 0x1F) == 0x07 || (type == 2 && (flco & 0x1F) == 0x05)))
     {
       is_cap_plus = 1;
       capsite = (uint8_t)ConvertBitIntoBytes(&lc_bits[48], 4); //don't believe so
       restchannel = (int)ConvertBitIntoBytes(&lc_bits[52], 4); //
       source = (uint32_t)ConvertBitIntoBytes(&lc_bits[56], 16);
-      if (flco == 0x07)
-        state->gi[slot] = 1;
-      else state->gi[slot] = 0;
+      if ((flco & 0x1F) == 0x04)
+        state->gi[slot] = 0;
+      else state->gi[slot] = 1;
     }
 
     //Unknown CapMax/Moto Things
@@ -273,6 +285,8 @@ void dmr_flco (dsd_opts * opts, dsd_state * state, uint8_t lc_bits[], uint32_t C
       state->data_byte_ctr[slot] = 0;
       //reset ks start value
       state->data_ks_start[slot] = 0;
+      //reset talker alias so a stale voice alias does not prefix data/LRRP info on TD_LC
+      dmr_talker_alias_reset(state, slot);
 
       goto END_FLCO;
     }
@@ -286,6 +300,8 @@ void dmr_flco (dsd_opts * opts, dsd_state * state, uint8_t lc_bits[], uint32_t C
       char tta_str[8]; memset(tta_str, 0, sizeof(tta_str));
       for (int i = 0; i < 7; i++)
         tta_str[i] = (uint8_t)ConvertBitIntoBytes(&lc_bits[16+(i*8)], 8);
+      if (tta_str[0] >= 0x20 && tta_str[0] < 0x7F)
+        state->dmr_mfid = 0x58;
       fprintf (stderr, "%s", tta_str);
       uint32_t source = 0;
       if (slot == 0)
@@ -461,14 +477,14 @@ void dmr_flco (dsd_opts * opts, dsd_state * state, uint8_t lc_bits[], uint32_t C
       {
         if (slot == 0)
         {
-          state->dmr_so |= 0x40; //OR the enc bit onto the SO
+          state->dmr_so |= 0x8040; //OR the enc bit onto the SO
           state->payload_algid = alg;
           state->payload_keyid = key;
           state->payload_mi = mi;
         }
         else
         {
-          state->dmr_soR |= 0x40; //OR the enc bit onto the SO
+          state->dmr_soR |= 0x8040; //OR the enc bit onto the SO
           state->payload_algidR = alg;
           state->payload_keyidR = key;
           state->payload_miR = mi;
@@ -495,58 +511,86 @@ void dmr_flco (dsd_opts * opts, dsd_state * state, uint8_t lc_bits[], uint32_t C
     }
   }
 
-  //will want to continue to observe for different flco and fid combinations to find out their meaning
-  if(*IrrecoverableErrors == 0 && is_alias == 0 && is_gps == 0)
+  if(*IrrecoverableErrors == 0 && CRCCorrect == 1 && is_alias == 0 && is_gps == 0)
   {
-    //set overarching manufacturer in use when non-standard feature id set is up
-    if (fid != 0) state->dmr_mfid = fid;
+    unsigned int prev_so = (slot == 0) ? state->dmr_so : state->dmr_soR;
+    uint32_t prev_tg     = (slot == 0) ? (uint32_t)state->lasttg : (uint32_t)state->lasttgR;
+    uint32_t prev_src    = (slot == 0) ? (uint32_t)state->lastsrc : (uint32_t)state->lastsrcR;
+    if (type != 1 && target != 0 && source != 0 &&
+        ((target == prev_tg && source == prev_src) || (type == 2 && target == prev_src && source == prev_tg)))
+      so |= (uint8_t)(prev_so & 0x0C);
+
+    if (flco == 0x00 && target != 0 && state->dmr_bcast_tg[slot] == target)
+      so |= 0x08;
+    else if (target != 0 && state->dmr_bcast_tg[slot] != 0 && state->dmr_bcast_tg[slot] != target)
+      state->dmr_bcast_tg[slot] = 0;
+
+    if (fid != 0x68 && ((flco & 0x1F) == 0x4 || (flco & 0x1F) == 0x5 || (flco & 0x1F) == 0x7))
+      state->gi[slot] = ((flco & 0x1F) == 0x4) ? 0 : 1;
+    else if (flco == 0x3 || flco == 0x13 || flco == 0x23)
+      state->gi[slot] = 1;
+    else
+      state->gi[slot] = 0;
 
     if (type != 2) //VLC and EMB, set our target, source, so, and fid per channel
     {
       if (state->currentslot == 0)
       {
+        if (type == 1) state->dmr_hangtime[0] = 0;
+        if (type == 1 || (state->lasttg != 0 && target != (uint32_t)state->lasttg) ||
+            (state->lastsrc != 0 && source != (uint32_t)state->lastsrc))
+          ambe_hw_reset_call(0);
+        if ((so & 0x40) == 0)
+          state->payload_algid = state->payload_mi = state->payload_miP = state->payload_keyid = 0;
         state->dmr_fid = fid;
-        state->dmr_so = so;
+        state->dmr_so = so | 0x8000;
         state->lasttg = target;
         state->lastsrc = source;
+        //talker change: drop old alias pieces
+        dmr_talker_alias_sync_source (state, 0, source);
       }
       if (state->currentslot == 1)
       {
+        if (type == 1) state->dmr_hangtime[1] = 0;
+        if (type == 1 || (state->lasttgR != 0 && target != (uint32_t)state->lasttgR) ||
+            (state->lastsrcR != 0 && source != (uint32_t)state->lastsrcR))
+          ambe_hw_reset_call(1);
+        if ((so & 0x40) == 0)
+          state->payload_algidR = state->payload_miR = state->payload_miN = state->payload_keyidR = 0;
         state->dmr_fidR = fid;
-        state->dmr_soR = so;
+        state->dmr_soR = so | 0x8000;
         state->lasttgR = target;
         state->lastsrcR = source;
+        //talker change: drop old alias pieces
+        dmr_talker_alias_sync_source (state, 1, source);
       }
 
       //update cc amd vc sync time for trunking purposes (particularly Con+)
-      if (opts->p25_is_tuned == 1)
-      {
+      if (!trunk_is_dmr_slot_blocked(opts, state, state->currentslot))
         state->last_vc_sync_time = time(NULL);
-        state->last_cc_sync_time = time(NULL);
-      }
+      state->last_cc_sync_time = time(NULL);
 
     }
 
-    if (type == 2) //TLC, zero out target, source, so, and fid per channel, and other odd and ends
+    if (type == 2) //TLC, update so and zero fid, crypto, and PDU state per channel (keep lasttg/lastsrc, dmr_so, and Talker Alias until IDLE / carrier drop)
     {
-      //I wonder which of these we truly want to zero out, possibly none of them
       if (state->currentslot == 0)
       {
+        state->errs = 0;
+        state->errs2 = 0;
         state->dmr_fid = 0;
-        state->dmr_so = 0;
-        state->lasttg = 0;
-        state->lastsrc = 0;
+        state->dmr_so = (prev_tg != 0 || prev_src != 0 || state->dmr_hangtime[0]) ? (so | 0x8000) : 0;
         state->payload_algid = 0;
         state->payload_mi = 0;
+        state->payload_miP = 0;
         state->payload_keyid = 0;
+        state->dropL = 256;
+        state->DMRvcL = 0;
+        ambe_hw_reset_slot(0);
         //reset gain
         if (opts->floating_point == 1)
           state->aout_gain = opts->audio_gain;
 
-        state->dmr_alias_block_len[0] = 0;
-        state->dmr_alias_char_size[0] = 0;
-        state->dmr_alias_format[0] = 0;
-        sprintf (state->generic_talker_alias[0], "%s", "");
         // sprintf (state->event_history_s[0].Event_History_Items[0].alias, "%s", "BUMBLEBEETUNA");
         memset (state->dmr_pdu_sf[0], 0, sizeof(state->dmr_pdu_sf[0]));
 
@@ -558,21 +602,21 @@ void dmr_flco (dsd_opts * opts, dsd_state * state, uint8_t lc_bits[], uint32_t C
       }
       if (state->currentslot == 1)
       {
+        state->errsR = 0;
+        state->errs2R = 0;
         state->dmr_fidR = 0;
-        state->dmr_soR = 0;
-        state->lasttgR = 0;
-        state->lastsrcR = 0;
+        state->dmr_soR = (prev_tg != 0 || prev_src != 0 || state->dmr_hangtime[1]) ? (so | 0x8000) : 0;
         state->payload_algidR = 0;
         state->payload_miR = 0;
+        state->payload_miN = 0;
         state->payload_keyidR = 0;
+        state->dropR = 256;
+        state->DMRvcR = 0;
+        ambe_hw_reset_slot(1);
         //reset gain
         if (opts->floating_point == 1)
           state->aout_gainR = opts->audio_gain;
 
-        state->dmr_alias_block_len[1] = 0;
-        state->dmr_alias_char_size[1] = 0;
-        state->dmr_alias_format[1] = 0;
-        sprintf (state->generic_talker_alias[1], "%s", "");
         // sprintf (state->event_history_s[1].Event_History_Items[0].alias, "%s", "BUMBLEBEETUNA");
         memset (state->dmr_pdu_sf[1], 0, sizeof(state->dmr_pdu_sf[1]));
 
@@ -588,14 +632,16 @@ void dmr_flco (dsd_opts * opts, dsd_state * state, uint8_t lc_bits[], uint32_t C
     //only assign this value here if not trunking
     // if (opts->p25_trunk == 0) //may be safe to always do this now with code changes, will want to test at some point (tg hold w/ dual voice / slco may optimally need this set)
     {
-      if (restchannel != state->dmr_rest_channel && restchannel != -1)
+      if (restchannel > 0)
       {
         state->dmr_rest_channel = restchannel;
-        //assign to cc freq
-        // if (state->trunk_chan_map[restchannel] != 0)
-        // {
-        //   state->p25_cc_freq = state->trunk_chan_map[restchannel];
-        // }
+        state->dmr_mfid = 0x10;
+        sprintf (state->dmr_branding, "%s", "Motorola");
+        sprintf (state->dmr_branding_sub, "%s", "Cap+ ");
+        if (strncmp(state->dmr_site_parms, "Site ", 5) != 0)
+          state->dmr_site_parms[0] = 0;
+        if (state->trunk_chan_map[restchannel] != 0)
+          state->p25_cc_freq = state->trunk_chan_map[restchannel];
       }
     }
 
@@ -614,48 +660,64 @@ void dmr_flco (dsd_opts * opts, dsd_state * state, uint8_t lc_bits[], uint32_t C
     //0x20 on the Embedded Voice Burst Sync seems to indicate a Moto w/ FID 0x10   Group Call in progress (RAS)
     //0x23 on the Embedded Voice Burst Sync seems to indicate a Moto w/ FID 0x10 Private Call in progress (RAS)
 
-    if (fid == 0x68) sprintf (state->call_string[slot], " Hytera  ");
+    const char * kind = NULL;
+    const char * mod = "";
+    if (fid == 0x68) kind = "Hytera";
 
-    else if (flco == 0x4 || flco == 0x5 || flco == 0x7) //Cap+ Things (double check 0x05)
+    else if ((flco & 0x1F) == 0x4 || (flco & 0x1F) == 0x5 || (flco & 0x1F) == 0x7) //Cap+ Things (double check 0x05)
     {
       // sprintf (state->call_string[slot], " Cap+");
-      sprintf (state->call_string[slot], "%s","");
       fprintf (stderr, "Cap+ ");
-      if (flco == 0x4)
+      if ((flco & 0x1F) == 0x4)
       {
-        // strcat (state->call_string[slot], " Grp");
-        sprintf (state->call_string[slot], "   Group ");
+        kind = "Group";
         fprintf (stderr, "Group ");
         state->gi[slot] = 0;
       }
       else
       {
-        // strcat (state->call_string[slot], " Pri");
-        sprintf (state->call_string[slot], " Private ");
+        kind = "Private";
         fprintf (stderr, "Private ");
         state->gi[slot] = 1;
       }
     }
     else if (flco == 0x3 || flco == 0x13 || flco == 0x23) //UU_V_Ch_Usr
     {
-      sprintf (state->call_string[slot], " Private ");
+      kind = "Private";
       fprintf (stderr, "Private ");
       state->gi[slot] = 1;
     }
     else //Grp_V_Ch_Usr
     {
-      sprintf (state->call_string[slot], "   Group ");
+      kind = "Group";
       fprintf (stderr, "Group ");
       state->gi[slot] = 0;
     }
 
     if(so & 0x80)
     {
-      strcat (state->call_string[slot], " Emergency  ");
+      mod = "Emergency";
       fprintf (stderr, "%s", KRED);
       fprintf(stderr, "Emergency ");
     }
-    else strcat (state->call_string[slot], "            ");
+    else if ((so & 0x40) && (so & 0x08))
+      mod = "Enc Bcast";
+    else if (so & 0x40)
+      mod = "Encrypted";
+    else if (so & 0x08)
+      mod = "Broadcast";
+    else if (so & 0x04)
+      mod = "OVCM";
+    else if ((fid == 0x10) && (so & 0x20))
+      mod = "TXI";
+    else if ((so & 0x03) == 0x01)
+      mod = "Priority 1";
+    else if ((so & 0x03) == 0x02)
+      mod = "Priority 2";
+    else if ((so & 0x03) == 0x03)
+      mod = "Priority 3";
+
+    dsd_set_call_string (state, slot, kind, mod);
 
     if(so & 0x40)
     {
@@ -701,11 +763,6 @@ void dmr_flco (dsd_opts * opts, dsd_state * state, uint8_t lc_bits[], uint32_t C
           sprintf (state->event_history_s[slot].Event_History_Items[0].internal_str, "Target: %d; has been locked out; Encryption Lock Out Enabled.", target);
           watchdog_event_current(opts, state, slot);
         }
-
-        //Craft a fake CSBK pdu send it to run as a p_clear to return to CC if available
-        uint8_t dummy[12]; uint8_t* dbits; memset (dummy, 0, sizeof(dummy)); dummy[0] = 46; dummy[1] = 255;
-        if ( (strcmp(gm, "B") == 0) && (strcmp(gn, "ENC LO") == 0)  ) //&& (opts->trunk_tune_data_calls == 0)
-          dmr_cspdu (opts, state, dbits, dummy, 1, 0);
 
       }
 
@@ -901,12 +958,45 @@ void dmr_flco (dsd_opts * opts, dsd_state * state, uint8_t lc_bits[], uint32_t C
       fprintf (stderr, "%s ", KNRM);
     }
 
+    //Return to CC via synthetic P_CLEAR when trunking onto a locked-out call (ENC LO, PVT LO, GRP LO, or [B])
+    if (opts->p25_trunk == 1 && state->p25_cc_freq != 0 &&
+        trunk_is_dmr_slot_blocked(opts, state, slot))
+    {
+      long int cur_freq = trunk_get_current_freq(opts, state);
+      if ((cur_freq != 0 && cur_freq != state->p25_cc_freq) ||
+          (cur_freq == 0 && opts->p25_is_tuned == 1))
+      {
+        uint8_t dummy[12]; uint8_t dbits[96];
+        memset (dummy, 0, sizeof(dummy));
+        memset (dbits, 0, sizeof(dbits));
+        dummy[0] = 46; dummy[1] = 255;
+        dmr_cspdu (opts, state, dbits, dummy, 1, 0);
+      }
+      else if (opts->p25_is_tuned == 1)
+      {
+        int oslot = (slot ^ 1) & 1;
+        uint8_t oburst = (oslot == 0) ? state->dmrburstL : state->dmrburstR;
+        int oslot_blocked = trunk_is_dmr_slot_blocked(opts, state, oslot);
+        if (oslot_blocked || (!state->dmr_hangtime[oslot] && oburst != 16 && oburst != 0 && oburst != 1))
+        {
+          opts->p25_is_tuned = 0;
+          state->last_vc_sync_time = 0;
+          state->p25_vc_freq[0] = state->p25_vc_freq[1] = 0;
+        }
+      }
+    }
+
   }
 
   END_FLCO:
 
-  //blank the call string here if its a TLC
-  if (type == 2) sprintf (state->call_string[slot], "%s", "                     "); //21 spaces
+  // Blank call_string on an orphaned TLC when no call is active on the slot
+  if (type == 2 && slot < 2 && !state->dmr_hangtime[slot] &&
+      ((slot == 0 && state->lasttg == 0 && state->lastsrc == 0) ||
+       (slot == 1 && state->lasttgR == 0 && state->lastsrcR == 0)))
+  {
+    sprintf (state->call_string[slot], "%s", "                     ");
+  }
 
   if (unk == 1 || pf == 1)
   {
@@ -1077,8 +1167,15 @@ uint8_t dmr_cach (dsd_opts * opts, dsd_state * state, uint8_t cach_bits[25])
     //run crc8
     crc = crc8_ok(slco_bits, 36);
 
-    //only run SLCO on good everything
-    if (h1 && h2 && h3 && crc) dmr_slco (opts, state, slco_bits);
+    //only run SLCO on good everything (and when CC filter is not blocking/unconfirmed)
+    if (h1 && h2 && h3 && crc)
+    {
+      if (opts->dmr_cc_filter < 0 || opts->dmr_cc_filter > 15 ||
+          (state->color_code_ok == 1 && (int)state->dmr_color_code == opts->dmr_cc_filter))
+      {
+        dmr_slco (opts, state, slco_bits);
+      }
+    }
     else
     {
       //this line break issue is wracking on my OCD for clean line breaks
@@ -1110,7 +1207,6 @@ void dmr_slco (dsd_opts * opts, dsd_state * state, uint8_t slco_bits[])
 
   //just going to decode the Short LC with all potential parameters known
   uint8_t slco = (uint8_t)ConvertBitIntoBytes(&slco_bits[0], 4);
-  uint8_t model = (uint8_t)ConvertBitIntoBytes(&slco_bits[4], 2);
   uint16_t netsite = (uint16_t)ConvertBitIntoBytes(&slco_bits[6], 12);
   uint8_t reg = slco_bits[18]; //registration required/not required or normalchanneltype/composite cch
   uint16_t csc = (uint16_t)ConvertBitIntoBytes(&slco_bits[19], 9); //common slot counter, 0-511
@@ -1149,62 +1245,21 @@ void dmr_slco (dsd_opts * opts, dsd_state * state, uint8_t slco_bits[])
   else if (ts2_act == 0b1011) sprintf (ts2_str, "%s", "Group Data");
   else if (ts2_act == 0b1100) sprintf (ts2_str, "%s", "Group Emergency");
   else if (ts2_act == 0b1101) sprintf (ts2_str, "%s", "Ind Emergency");
-  else                        sprintf (ts2_str, "Res %X", ts1_act);
+  else                        sprintf (ts2_str, "Res %X", ts2_act);
 
-  //DMR Location Area - DMRLA - should probably be state variables so we can use this in both slc and csbk
+  //DMR Location Area - DMRLA
   uint16_t sub_mask = 0x1;
-  //tiny n 1-3; small 1-5; large 1-8; huge 1-10
-  uint16_t n = 1; //The minimum value of DMRLA is normally ≥ 1, 0 is reserved
-
-  //TODO: Add logic to set n and sub_mask values for DMRLA
-  //assigning n as largest possible value for model type
+  uint16_t n = 1;
 
   //Sys_Parms
   if (slco == 0x2 || slco == 0x3)
   {
-    if (model == 0) //Tiny
-    {
-      net  = (uint16_t)ConvertBitIntoBytes(&slco_bits[6], 9);
-      site = (uint16_t)ConvertBitIntoBytes(&slco_bits[15], 3);
-      sprintf (model_str, "%s", "Tiny");
-      n = 3;
-    }
-    else if (model == 1) //Small
-    {
-      net  = (uint16_t)ConvertBitIntoBytes(&slco_bits[6], 7);
-      site = (uint16_t)ConvertBitIntoBytes(&slco_bits[13], 5);
-      sprintf (model_str, "%s", "Small");
-      n = 5;
-    }
-    else if (model == 2) //Large
-    {
-      net  = (uint16_t)ConvertBitIntoBytes(&slco_bits[6], 4);
-      site = (uint16_t)ConvertBitIntoBytes(&slco_bits[10], 8);
-      sprintf (model_str, "%s", "Large");
-      n = 8;
-    }
-    else if (model == 3) //Huge
-    {
-      net  = (uint16_t)ConvertBitIntoBytes(&slco_bits[6], 2);
-      site = (uint16_t)ConvertBitIntoBytes(&slco_bits[8], 10);
-      sprintf (model_str, "%s", "Huge");
-      n = 10;
-    }
+    uint16_t t3_syscode = (uint16_t)ConvertBitIntoBytes(&slco_bits[4], 14);
+    dmr_parse_t3_syscode (t3_syscode, &net, &site, &n, model_str, sizeof(model_str));
+    dmr_record_t3_syscode (state, t3_syscode, 0);
+    n = dmr_effective_t3_n (opts, state, t3_syscode, n, 0);
 
-    if (opts->dmr_dmrla_is_set == 1) n = opts->dmr_dmrla_n;
-
-    if (n == 0) sub_mask = 0x0;
-    if (n == 1) sub_mask = 0x1;
-    if (n == 2) sub_mask = 0x3;
-    if (n == 3) sub_mask = 0x7;
-    if (n == 4) sub_mask = 0xF;
-    if (n == 5) sub_mask = 0x1F;
-    if (n == 6) sub_mask = 0x3F;
-    if (n == 7) sub_mask = 0x7F;
-    if (n == 8) sub_mask = 0xFF;
-    if (n == 9) sub_mask = 0x1FF;
-    if (n == 10) sub_mask = 0x3FF;
-
+    sub_mask = (n == 0) ? 0 : (uint16_t)((1U << n) - 1);
   }
 
   //Con+
@@ -1229,68 +1284,135 @@ void dmr_slco (dsd_opts * opts, dsd_state * state, uint8_t slco_bits[])
   if (slco == 0x2) //C_SYS_Parms
   {
     uint16_t syscode = (uint16_t)ConvertBitIntoBytes(&slco_bits[4], 14);
+    if (state->dmr_t3_syscode != syscode)
+    {
+      state->dmr_is_ras = 0;
+      state->dmr_branding[0] = 0;
+      state->dmr_mfid = -1;
+      state->dmr_neighbor_count = 0;
+    }
+    state->dmr_rest_channel = -1;
+    state->dmr_t3_syscode = syscode;
+    if (state->dmr_branding_sub[0] != 0)
+    {
+      state->dmr_branding[0] = 0;
+      state->dmr_branding_sub[0] = 0;
+      state->dmr_mfid = -1;
+    }
     if (n != 0) fprintf (stderr, " SLC_C_SYS_PARMS: %s; Net ID: %d; Site ID: %d.%d; Reg Req: %d; CSC: %d;", model_str, net+1, (site>>n)+1, (site & sub_mask)+1, reg, csc);
     else fprintf (stderr, " SLC_C_SYS_PARMS: %s; Net ID: %d; Site ID: %d; Reg Req: %d;", model_str, net, site, reg);
     fprintf (stderr, " SYS: %04X;", syscode); //#192
 
     //add string for ncurses terminal display
-    // if (n != 0) sprintf (state->dmr_site_parms, "TIII - %s %d-%d.%d; SYS: %04X; ", model_str, net+1, (site>>n)+1, (site & sub_mask)+1, syscode );
-    // else sprintf (state->dmr_site_parms, "TIII - %s %d-%d; SYS: %04X; ", model_str, net, site, syscode);
-    if (n != 0) sprintf (state->dmr_site_parms, "TIII %s:%d-%d.%d;%04X; ", model_str, net+1, (site>>n)+1, (site & sub_mask)+1, syscode );
-    else sprintf (state->dmr_site_parms, "TIII %s:%d-%d;%04X; ", model_str, net, site, syscode);
+    dmr_refresh_t3_site_parms (opts, state);
 
-    //if using rigctl we can set an unknown cc frequency by polling rigctl for the current frequency
-    if (opts->use_rigctl == 1 && state->p25_cc_freq == 0) //if not set from channel map 0
+    //if using rigctl we can set an unknown or updated cc frequency by polling rigctl for the current frequency
+    if (opts->use_rigctl == 1 && opts->p25_is_tuned == 0)
     {
-      ccfreq = GetCurrentFreq (opts->rigctl_sockfd);
-      if (ccfreq != 0) state->p25_cc_freq = ccfreq;
+      ccfreq = trunk_get_current_freq (opts, state);
+      trunk_set_cc_freq_if_valid (opts, state, ccfreq);
+    }
+    if (opts->audio_in_type == 3 && opts->p25_is_tuned == 0)
+    {
+      ccfreq = (long int)opts->rtlsdr_center_freq;
+      trunk_set_cc_freq_if_valid (opts, state, ccfreq);
     }
 
   }
   else if (slco == 0x3) //P_SYS_Parms
   {
     uint16_t syscode = (uint16_t)ConvertBitIntoBytes(&slco_bits[4], 14);
+    if (state->dmr_t3_syscode != syscode)
+    {
+      state->dmr_is_ras = 0;
+      state->dmr_branding[0] = 0;
+      state->dmr_mfid = -1;
+      state->dmr_neighbor_count = 0;
+    }
+    state->dmr_rest_channel = -1;
+    state->dmr_t3_syscode = syscode;
+    if (state->dmr_branding_sub[0] != 0)
+    {
+      state->dmr_branding[0] = 0;
+      state->dmr_branding_sub[0] = 0;
+      state->dmr_mfid = -1;
+    }
     if (n != 0) fprintf (stderr, " SLC_P_SYS_PARMS: %s; Net ID: %d; Site ID: %d.%d; Comp CC: %d;", model_str, net+1, (site>>n)+1, (site & sub_mask)+1, reg);
     else fprintf (stderr, " SLC_P_SYS_PARMS: %s; Net ID: %d; Site ID: %d;", model_str, net, site);
     fprintf (stderr, " SYS: %04X;", syscode); //#192
 
     //add string for ncurses terminal display
-    // if (n != 0) sprintf (state->dmr_site_parms, "TIII - %s %d-%d.%d; SYS: %04X; ", model_str, net+1, (site>>n)+1, (site & sub_mask)+1, syscode );
-    // else sprintf (state->dmr_site_parms, "TIII - %s %d-%d; SYS: %04X; ", model_str, net, site, syscode);
-    if (n != 0) sprintf (state->dmr_site_parms, "TIII %s:%d-%d.%d;%04X; ", model_str, net+1, (site>>n)+1, (site & sub_mask)+1, syscode );
-    else sprintf (state->dmr_site_parms, "TIII %s:%d-%d;%04X; ", model_str, net, site, syscode);
+    dmr_refresh_t3_site_parms (opts, state);
   }
   else if (slco == 0x0) //null
+  {
     fprintf (stderr, " SLCO NULL ");
+    state->dmr_rest_channel = -1;
+    if (opts->p25_is_tuned == 0)
+    {
+      if (state->dmr_branding_sub[0] != 0 || state->dmr_t3_syscode != 0)
+        state->dmr_is_ras = 0;
+      state->dmr_branding[0] = 0;
+      state->dmr_branding_sub[0] = 0;
+      state->dmr_site_parms[0] = 0;
+      state->dmr_t3_syscode = 0;
+      state->dmr_neighbor_count = 0;
+      if (opts->p25_trunk == 0)
+        state->p25_cc_freq = 0;
+      trunk_reset_dmr_channel_state();
+    }
+  }
   else if (slco == 0x1)
   {
     fprintf (stderr, " Activity Update"); //102 361-2 7.1.3.2
     fprintf (stderr, " TS1: %s; Hash: %d;", ts1_str, ts1_hash);
     fprintf (stderr, " TS2: %s; Hash: %d;", ts2_str, ts2_hash);
+    state->dmr_rest_channel = -1;
+    if (opts->p25_is_tuned == 0)
+    {
+      if (state->dmr_branding_sub[0] != 0 || state->dmr_t3_syscode != 0)
+        state->dmr_is_ras = 0;
+      state->dmr_branding[0] = 0;
+      state->dmr_branding_sub[0] = 0;
+      state->dmr_site_parms[0] = 0;
+      state->dmr_t3_syscode = 0;
+      state->dmr_neighbor_count = 0;
+      if (opts->p25_trunk == 0)
+        state->p25_cc_freq = 0;
+      trunk_reset_dmr_channel_state();
+    }
   }
   else if (slco == 0x9)
   {
+    state->dmr_rest_channel = -1;
+    if (state->dmr_t3_syscode != 0)
+      state->dmr_neighbor_count = 0;
+    state->dmr_t3_syscode = 0;
     fprintf (stderr, " SLCO Connect Plus Traffic Channel - Net ID: %d Site ID: %d", con_netid, con_siteid);
     sprintf (state->dmr_site_parms, "%d-%d ", con_netid, con_siteid);
   }
 
   else if (slco == 0xA)
   {
+    state->dmr_rest_channel = -1;
+    if (state->dmr_t3_syscode != 0)
+      state->dmr_neighbor_count = 0;
+    state->dmr_t3_syscode = 0;
     fprintf (stderr, " SLCO Connect Plus Control Channel - Net ID: %d Site ID: %d", con_netid, con_siteid);
     sprintf (state->dmr_site_parms, "%d-%d ", con_netid, con_siteid);
 
     //if using rigctl we can set an unknown cc frequency by polling rigctl for the current frequency
     if (opts->use_rigctl == 1 && opts->p25_is_tuned == 0)
     {
-      ccfreq = GetCurrentFreq (opts->rigctl_sockfd);
-      if (ccfreq != 0) state->p25_cc_freq = ccfreq;
+      ccfreq = trunk_get_current_freq (opts, state);
+      trunk_set_cc_freq_if_valid (opts, state, ccfreq);
     }
 
     //if using rtl input, we can ask for the current frequency tuned
     if (opts->audio_in_type == 3 && opts->p25_is_tuned == 0)
     {
       ccfreq = (long int)opts->rtlsdr_center_freq;
-      if (ccfreq != 0) state->p25_cc_freq = ccfreq;
+      trunk_set_cc_freq_if_valid (opts, state, ccfreq);
     }
 
     //if on Con+ control channel and no activity in this window
@@ -1303,10 +1425,13 @@ void dmr_slco (dsd_opts * opts, dsd_state * state, uint8_t slco_bits[])
   {
     uint32_t unk = (uint32_t)ConvertBitIntoBytes(&slco_bits[4], 24);
     fprintf (stderr, " SLCO Caltta: %06X;", unk);
+    if (state->dmr_branding_sub[0] == 0)
+      snprintf (state->dmr_branding, sizeof(state->dmr_branding), "%s", "Caltta");
   }
 
   else if (slco == 0xE)
   {
+    state->dmr_rest_channel = -1;
     uint32_t update_tgt = (uint32_t)ConvertBitIntoBytes(&slco_bits[4], 24);
     fprintf (stderr, " SLCO Cap Max Activity Update; TGT: %d;", update_tgt);
   }
@@ -1314,6 +1439,22 @@ void dmr_slco (dsd_opts * opts, dsd_state * state, uint8_t slco_bits[])
   else if (slco == 0xF) //This opcode has also been observed on Cap Max Payload Channels
   {
     fprintf (stderr, " SLCO Capacity Plus Site: %d - Rest LSN: %d - RS: %02X", capsite, restchannel, cap_reserved);
+    if (strncmp(state->dmr_site_parms, "TIII", 4) != 0 && restchannel > 0)
+    {
+      if (state->dmr_t3_syscode != 0)
+        state->dmr_neighbor_count = 0;
+      state->dmr_t3_syscode = 0;
+      state->dmr_rest_channel = restchannel;
+      state->dmr_mfid = 0x10;
+      sprintf (state->dmr_branding, "%s", "Motorola");
+      sprintf (state->dmr_branding_sub, "%s", "Cap+ ");
+      if (capsite > 0)
+        sprintf (state->dmr_site_parms, "Site %d; ", capsite);
+      else if (strncmp(state->dmr_site_parms, "Site ", 5) != 0)
+        state->dmr_site_parms[0] = 0;
+      if (state->trunk_chan_map[restchannel] != 0)
+        state->p25_cc_freq = state->trunk_chan_map[restchannel];
+    }
 
     //extra handling for TG hold while trunking enabled
     if (state->tg_hold != 0 && opts->p25_trunk == 1) //logic seems to be fixed now for new rest lsn logic and other considerations
@@ -1376,6 +1517,10 @@ void dmr_slco (dsd_opts * opts, dsd_state * state, uint8_t slco_bits[])
   }
   else if (slco == 0x08)
   {
+    state->dmr_rest_channel = -1;
+    if (state->dmr_t3_syscode != 0)
+      state->dmr_neighbor_count = 0;
+    state->dmr_t3_syscode = 0;
     //The Priority Repeater and Priority Hash values stem from SDRTrunk, but I've never seen these values not be zeroes
     fprintf (stderr, " SLCO Hytera XPT - Free LCN %d - PRI LCN %d - PRI HASH: %02X", xpt_free, xpt_pri, xpt_hash);
     //NOTE: on really busy systems, this free repeater assignment can lag due to the 4 TS requirment to get SLC

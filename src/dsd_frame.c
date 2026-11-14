@@ -79,6 +79,20 @@ processFrame (dsd_opts * opts, dsd_state * state)
     }
 
   //NXDN FSW
+  if ((state->synctype == 41) || (state->synctype == 42))
+  {
+    sprintf (state->fsubtype, " DATA         ");
+    processTetra (opts, state);
+    return;
+  }
+
+  if (state->synctype == 44)
+  {
+    sprintf (state->fsubtype, " PACKET       ");
+    processAPRS (opts, state);
+    return;
+  }
+
   if ((state->synctype == 28) || (state->synctype == 29))
   {
     //MBEout restored, is not handled internally by nxdn_frame.c
@@ -107,28 +121,13 @@ processFrame (dsd_opts * opts, dsd_state * state)
     else if ((state->synctype >= 10 && state->synctype <= 13) || (state->synctype == 32) || (state->synctype == 33) || (state->synctype == 34) ) //32-34 DMR MS and RC
     {
 
-      //print manufacturer strings to branding, disabled 0x10 moto other systems can use that fid set
-      //0x06 is trident, but when searching, apparently, they developed con+, but was bought by moto?
-      if (state->dmr_mfid == 0x10) ; //sprintf (state->dmr_branding, "%s",  "Motorola");
-      else if (state->dmr_mfid == 0x68) sprintf (state->dmr_branding, "%s", "  Hytera");
-      else if (state->dmr_mfid == 0x58) sprintf (state->dmr_branding, "%s", "    Tait");
-
-      //disabling these due to random data decodes setting an odd mfid, could be legit, but only for that one packet?
-      //or, its just a decode error somewhere
-      // else if (state->dmr_mfid == 0x20) sprintf (state->dmr_branding, "%s", "JVC Kenwood");
-      // else if (state->dmr_mfid == 0x04) sprintf (state->dmr_branding, "%s", "Flyde Micro");
-      // else if (state->dmr_mfid == 0x05) sprintf (state->dmr_branding, "%s", "PROD-EL SPA");
-      // else if (state->dmr_mfid == 0x06) sprintf (state->dmr_branding, "%s", "Motorola"); //trident/moto con+
-      // else if (state->dmr_mfid == 0x07) sprintf (state->dmr_branding, "%s", "RADIODATA");
-      // else if (state->dmr_mfid == 0x08) sprintf (state->dmr_branding, "%s", "Hytera");
-      // else if (state->dmr_mfid == 0x09) sprintf (state->dmr_branding, "%s", "ASELSAN");
-      // else if (state->dmr_mfid == 0x0A) sprintf (state->dmr_branding, "%s", "Kirisun");
-      // else if (state->dmr_mfid == 0x0B) sprintf (state->dmr_branding, "%s", "DMR Association");
-      // else if (state->dmr_mfid == 0x13) sprintf (state->dmr_branding, "%s", "EMC S.P.A.");
-      // else if (state->dmr_mfid == 0x1C) sprintf (state->dmr_branding, "%s", "EMC S.P.A.");
-      // else if (state->dmr_mfid == 0x33) sprintf (state->dmr_branding, "%s", "Radio Activity");
-      // else if (state->dmr_mfid == 0x3C) sprintf (state->dmr_branding, "%s", "Radio Activity");
-      // else if (state->dmr_mfid == 0x77) sprintf (state->dmr_branding, "%s", "Vertex Standard");
+      //print manufacturer strings to branding; skip 0x10 (generic DMRA) and preserve Cap+/Con+/XPT sub-branding
+      if (state->dmr_branding_sub[0] == 0 && state->dmr_mfid != 0x10)
+      {
+        const char * brand = dmr_mfid_name(state->dmr_mfid);
+        if (brand != NULL)
+          snprintf (state->dmr_branding, sizeof(state->dmr_branding), "%s", brand);
+      }
 
       //disable so radio id doesn't blink in and out during ncurses and aggressive_framesync
       state->nac = 0;
@@ -391,7 +390,8 @@ processFrame (dsd_opts * opts, dsd_state * state)
               // NAC fixed by error correction
               state->nac = new_nac;
               //apparently, both 0 and 0xFFF can the BCH code on signal drop
-              if (state->p2_hardset == 0 && new_nac != 0 && new_nac != 0xFFF)
+              if (state->p2_hardset == 0 && new_nac != 0 && new_nac != 0xFFF &&
+                  (opts->p25_nac_filter < 0 || opts->p25_nac_filter > 0xFFF || new_nac == opts->p25_nac_filter))
               {
                 state->p2_cc = new_nac;
               }
@@ -410,6 +410,27 @@ processFrame (dsd_opts * opts, dsd_state * state)
           duid[0] = 'E';
           duid[1] = 'E';
           state->debug_header_critical_errors++;
+      }
+
+      //P25 NAC Filter: ignore non-matching NACs
+      if (check_result && opts->p25_nac_filter >= 0 && opts->p25_nac_filter <= 0xFFF &&
+          state->nac != opts->p25_nac_filter)
+      {
+          if (opts->errorbars == 1)
+          {
+              printFrameInfo (opts, state);
+              fprintf (stderr, " [NAC FILTER: %03X]\n", opts->p25_nac_filter);
+          }
+          memset (state->audio_out_temp_buf, 0, sizeof(state->audio_out_temp_buf));
+          memset (state->s_l, 0, sizeof(state->s_l));
+          memset (state->s_lu, 0, sizeof(state->s_lu));
+          state->lastp25type = 0;
+          sprintf (state->fsubtype, "              ");
+          return;
+      }
+      if (check_result)
+      {
+          state->last_cc_sync_time = time(NULL);
       }
     }
 
@@ -534,6 +555,7 @@ processFrame (dsd_opts * opts, dsd_state * state)
       mbe_initMbeParms (state->cur_mp, state->prev_mp, state->prev_mp_enhanced);
       state->lasttg = 0;
       state->lastsrc = 0;
+      ambe_hw_reset_call(0);
       state->lastp25type = 0;
       state->err_str[0] = 0;
       sprintf (state->fsubtype, " TDU          ");
@@ -559,6 +581,7 @@ processFrame (dsd_opts * opts, dsd_state * state)
       }
       state->lasttg = 0;
       state->lastsrc = 0;
+      ambe_hw_reset_call(0);
       state->lastp25type = 3;
       sprintf (state->fsubtype, " TSBK         ");
 

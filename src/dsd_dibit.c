@@ -219,6 +219,7 @@ use_symbol (dsd_opts* opts, dsd_state* state, int symbol)
   //dmr buffer
   if (state->dmr_payload_p > state->dmr_payload_buf + 900000)
   {
+   memcpy(state->dmr_payload_buf, state->dmr_payload_p - 200, 200 * sizeof(int));
    state->dmr_payload_p = state->dmr_payload_buf + 200;
   }
   //dmr buffer end
@@ -293,7 +294,7 @@ int digitize (dsd_opts* opts, dsd_state* state, int symbol)
           (state->synctype == 9)  || (state->synctype == 11) || (state->synctype == 13) ||
           (state->synctype == 17) || (state->synctype == 29) || (state->synctype == 31) ||
           (state->synctype == 77) || (state->synctype == 87) ||(state->synctype == 36) ||
-          (state->synctype == 99)                              )
+          (state->synctype == 99) || (state->synctype == 42)   )
 
     {
       //  1 -P25p1

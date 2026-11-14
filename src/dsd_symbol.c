@@ -28,11 +28,17 @@ getSymbol (dsd_opts * opts, dsd_state * state, int have_sync)
   count = 0;
   sample = 0; //init sample with a value of 0...see if this was causing issues with raw audio monitoring
 
+  if (opts->frame_tetra == 1 && opts->audio_in_type != 4 && opts->audio_in_type != 44)
+  {
+    state->samplesPerSymbol = tetra_prepare_symbol_steps(opts, state);
+    state->symbolCenter = 0;
+  }
+
   for (i = 0; i < state->samplesPerSymbol; i++) //right HERE
     {
 
       // timing control
-      if ((i == 0) && (have_sync == 0))
+      if ((i == 0) && (have_sync == 0) && (opts->frame_tetra == 0) && (opts->frame_aprs == 0))
         {
           if (state->samplesPerSymbol == 20)
             {
@@ -115,6 +121,7 @@ getSymbol (dsd_opts * opts, dsd_state * state, int have_sync)
           //open pulse input if we are pulse output AND using ncurses terminal
           if (opts->audio_out_type == 0 && opts->use_ncurses_terminal == 1)
           {
+            if (opts->frame_tetra == 1) { tetra_release_voice_slot(opts, state, 1); tetra_reset_state(state); }
             opts->audio_in_type = 0; //set input type
             openPulseInput(opts); //open pulse input
           }
@@ -174,6 +181,7 @@ getSymbol (dsd_opts * opts, dsd_state * state, int have_sync)
           result = sf_read_short(opts->tcp_file_in, &sample, 1);
           if (result == 0) {
             sf_close(opts->tcp_file_in);
+            if (opts->frame_tetra == 1) { tetra_release_voice_slot(opts, state, 1); tetra_reset_state(state); }
             opts->audio_in_type = 0; //set input type
             opts->tcp_sockfd = 0; //added this line so we will know if it connected when using ncurses terminal keyboard shortcut
             //openPulseInput(opts); //open pulse inpput
@@ -183,7 +191,8 @@ getSymbol (dsd_opts * opts, dsd_state * state, int have_sync)
             {
               fprintf (stderr, "Connection to TCP Server Disconnected.\n");
               fprintf (stderr, "Opening Pulse Audio Input.\n");
-              opts->audio_in_type = 0; //set input type
+              if (opts->frame_tetra == 1) { tetra_release_voice_slot(opts, state, 1); tetra_reset_state(state); }
+            opts->audio_in_type = 0; //set input type
               openPulseInput(opts); //open pulse input
             }
             //else cleanup and exit
@@ -236,6 +245,7 @@ getSymbol (dsd_opts * opts, dsd_state * state, int have_sync)
           result = sf_read_short(opts->tcp_file_in, &sample, 1);
           if (result == 0) {
             sf_close(opts->tcp_file_in);
+            if (opts->frame_tetra == 1) { tetra_release_voice_slot(opts, state, 1); tetra_reset_state(state); }
             opts->audio_in_type = 0; //set input type
             opts->tcp_sockfd = 0; //added this line so we will know if it connected when using ncurses terminal keyboard shortcut
             openPulseInput(opts); //open pulse inpput
@@ -412,11 +422,11 @@ getSymbol (dsd_opts * opts, dsd_state * state, int have_sync)
             }
         }
 
-      if ((sample > state->max) && (have_sync == 1) && (state->rf_mod == 0))
+      if ((sample > state->max) && (have_sync == 1) && (state->rf_mod == 0) && (opts->frame_tetra == 0) && (opts->frame_aprs == 0))
         {
           sample = state->max;
         }
-      else if ((sample < state->min) && (have_sync == 1) && (state->rf_mod == 0))
+      else if ((sample < state->min) && (have_sync == 1) && (state->rf_mod == 0) && (opts->frame_tetra == 0) && (opts->frame_aprs == 0))
         {
           sample = state->min;
         }
@@ -497,7 +507,15 @@ getSymbol (dsd_opts * opts, dsd_state * state, int have_sync)
               count++;
             }
         }
-      if (state->samplesPerSymbol == 5) //provoice or gfsk
+      if (opts->frame_tetra == 1 || state->samplesPerSymbol < 5)
+        {
+          if (i == state->symbolCenter)
+            {
+              sum += sample;
+              count++;
+            }
+        }
+      else if (state->samplesPerSymbol == 5) //provoice or gfsk
         {
           if (i == 2)
             {
@@ -589,11 +607,36 @@ getSymbol (dsd_opts * opts, dsd_state * state, int have_sync)
         }
 
 
+      if (opts->frame_tetra == 1 && opts->audio_in_type != 4 && opts->audio_in_type != 44)
+        {
+          tetra_push_audio_sample(opts, state, sample);
+        }
+      if (opts->frame_aprs == 1 && opts->audio_in_type != 4 && opts->audio_in_type != 44)
+        {
+          aprs_push_audio_sample(opts, state, sample);
+          if (state->aprs_frame_ready)
+            {
+              state->lastsample = sample;
+              if (count == 0)
+                {
+                  sum = sample;
+                  count = 1;
+                }
+              break;
+            }
+        }
       state->lastsample = sample;
 
     }
 
-  symbol = (sum / count);
+  if (opts->frame_tetra == 1 && opts->audio_in_type != 4 && opts->audio_in_type != 44)
+    {
+      symbol = tetra_finish_symbol(opts, state);
+    }
+  else
+    {
+      symbol = (sum / count);
+    }
 
   if ((opts->symboltiming == 1) && (have_sync == 0) && (state->lastsynctype != -1))
     {
@@ -637,9 +680,17 @@ getSymbol (dsd_opts * opts, dsd_state * state, int have_sync)
       return(-1);
     }
 
-    state->symbolc = fgetc(opts->symbolfile);
+    if (opts->frame_tetra == 1 && state->tetra_sym_count < state->tetra_bin_write_count)
+    {
+      state->symbolc = state->tetra_sym_ring[state->tetra_sym_count & 1023];
+    }
+    else
+    {
+      state->symbolc = fgetc(opts->symbolfile);
+    }
 
     //fprintf(stderr, "%d", state->symbolc);
+    if (opts->frame_tetra == 0 || state->tetra_sym_count >= state->tetra_bin_write_count)
     if( feof(opts->symbolfile) )
     {
       // opts->audio_in_type = 0; //switch to pulse after playback, ncurses terminal can initiate replay if wanted
@@ -648,6 +699,7 @@ getSymbol (dsd_opts * opts, dsd_state * state, int have_sync)
       //in debug mode, re-run .bin files over and over (look for memory leaks, etc)
       if (state->debug_mode == 1)
       {
+        if (opts->frame_tetra == 1) { tetra_release_voice_slot(opts, state, 1); tetra_reset_state(state); state->tetra_bin_write_count = state->tetra_sym_count; }
         opts->symbolfile = NULL;
         opts->symbolfile = fopen(opts->audio_in_dev, "r");
         opts->audio_in_type = 4; //symbol capture bin files
@@ -655,6 +707,7 @@ getSymbol (dsd_opts * opts, dsd_state * state, int have_sync)
       //open pulse input if we are pulse output AND using ncurses terminal
       else if (opts->audio_out_type == 0 && opts->use_ncurses_terminal == 1)
       {
+        if (opts->frame_tetra == 1) { tetra_release_voice_slot(opts, state, 1); tetra_reset_state(state); state->tetra_bin_write_count = state->tetra_sym_count; }
         opts->audio_in_type = 0; //set input type
         openPulseInput(opts); //open pulse input
       }
@@ -710,6 +763,15 @@ getSymbol (dsd_opts * opts, dsd_state * state, int have_sync)
     symbol = (int)float_symbol * (int)10000;
   }
 
+  if (opts->frame_tetra == 1 && (opts->audio_in_type == 4 || opts->audio_in_type == 44))
+  {
+    if (state->tetra_sym_count >= state->tetra_bin_write_count)
+    {
+      state->tetra_sym_ring[state->tetra_bin_write_count & 1023] = (opts->audio_in_type == 4) ? state->symbolc : symbol;
+      state->tetra_bin_write_count++;
+    }
+    state->tetra_sym_count++;
+  }
   state->symbolcnt++;
   return (symbol);
 }

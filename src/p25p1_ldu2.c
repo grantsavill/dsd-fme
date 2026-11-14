@@ -562,16 +562,24 @@ processLDU2 (dsd_opts * opts, dsd_state * state)
   int k = 0;
   if (state->dmr_alias_format[0] == 0x02)
   {
-    k = state->data_block_counter[0];
-    if ( (lsd_hex1 > 0x19) && (lsd_hex1 < 0x7F) && (lsd1_okay == 1) )
-      state->dmr_alias_block_segment[0][0][k/4][k%4] = (char)lsd_hex1;
-    // else state->dmr_alias_block_segment[0][0][k/4][k%4] = 0x20;
-    k++;
-    if ( (lsd_hex2 > 0x19) && (lsd_hex2 < 0x7F) && (lsd2_okay == 1) )
-      state->dmr_alias_block_segment[0][0][k/4][k%4] = (char)lsd_hex2;
-    // else state->dmr_alias_block_segment[0][0][k/4][k%4] = 0x20;
-    k++;
-    state->data_block_counter[0] = k;
+    if (lsd1_okay == 0 || lsd2_okay == 0)
+    {
+      state->dmr_alias_format[0] = 0;
+      state->data_block_counter[0] = 0;
+      state->dmr_alias_block_len[0] = 0;
+      memset (state->dmr_alias_block_segment[0][0], 0, sizeof(state->dmr_alias_block_segment[0][0]));
+    }
+    else
+    {
+      k = state->data_block_counter[0];
+      if ( (lsd_hex1 > 0x19) && (lsd_hex1 < 0x7F) )
+        state->dmr_alias_block_segment[0][0][k/4][k%4] = (char)lsd_hex1;
+      k++;
+      if ( (lsd_hex2 > 0x19) && (lsd_hex2 < 0x7F) )
+        state->dmr_alias_block_segment[0][0][k/4][k%4] = (char)lsd_hex2;
+      k++;
+      state->data_block_counter[0] = k;
+    }
   }
 
   //reset format, len, counter.
@@ -581,6 +589,7 @@ processLDU2 (dsd_opts * opts, dsd_state * state)
     if (lsd_hex2 > 8) lsd_hex2 = 8; //sanity check
     state->dmr_alias_block_len[0] = lsd_hex2;
     state->data_block_counter[0] = 0;
+    memset (state->dmr_alias_block_segment[0][0], 0, sizeof(state->dmr_alias_block_segment[0][0]));
   }
 
   if ( (k >= state->dmr_alias_block_len[0]) && (state->dmr_alias_format[0] == 0x02) )

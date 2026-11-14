@@ -73,10 +73,7 @@ void p25_lcw (dsd_opts * opts, dsd_state * state, uint8_t LCW_bits[], uint8_t ir
         // if (source != 0) //disable now with new event history, if same src next ptt, then it will capture all of them as individual event items
           state->lastsrc = source;
 
-        sprintf (state->call_string[0], "   Group ");
-        if (lc_svcopt & 0x80) strcat (state->call_string[0], " Emergency  ");
-        else if (lc_svcopt & 0x40) strcat (state->call_string[0], " Encrypted  ");
-        else strcat (state->call_string[0], "            ");
+        dsd_set_call_string (state, 0, "Group", (lc_svcopt & 0x80) ? "Emergency" : (lc_svcopt & 0x40) ? "Encrypted" : "");
       }
 
       else if (lc_format == 0x03)
@@ -94,10 +91,7 @@ void p25_lcw (dsd_opts * opts, dsd_state * state, uint8_t LCW_bits[], uint8_t ir
         state->gi[0] = 1;
         state->dmr_so = lc_svcopt;
 
-        sprintf (state->call_string[0], " Private ");
-        if (lc_svcopt & 0x80) strcat (state->call_string[0], " Emergency  ");
-        else if (lc_svcopt & 0x40) strcat (state->call_string[0], " Encrypted  ");
-        else strcat (state->call_string[0], "            ");
+        dsd_set_call_string (state, 0, "Private", (lc_svcopt & 0x80) ? "Emergency" : (lc_svcopt & 0x40) ? "Encrypted" : "");
 
       }
 
@@ -307,6 +301,7 @@ void p25_lcw (dsd_opts * opts, dsd_state * state, uint8_t LCW_bits[], uint8_t ir
         uint32_t tgt = (uint32_t)ConvertBitIntoBytes(&LCW_bits[48], 24); //can be individual, or all units (0xFFFFFF)
         fprintf (stderr, " Call Termination; TGT: %d;", tgt);
         memset (state->dmr_pdu_sf[0], 0, sizeof (state->dmr_pdu_sf[0])); //reset storage for any talker alias (or other items)
+        p25_talker_alias_reset(state, 0);
         if (opts->p25_trunk == 1 && state->p25_cc_freq != 0 && opts->p25_is_tuned == 1)
         {
 
@@ -347,6 +342,7 @@ void p25_lcw (dsd_opts * opts, dsd_state * state, uint8_t LCW_bits[], uint8_t ir
           {
             state->lasttg = 0;
             state->lastsrc = 0;
+            ambe_hw_reset_call(0);
             state->gi[0] = -1;
             state->payload_algid = 0;
             state->payload_keyid = 0;
@@ -367,6 +363,7 @@ void p25_lcw (dsd_opts * opts, dsd_state * state, uint8_t LCW_bits[], uint8_t ir
             #ifdef USE_RTLSDR
             state->lasttg = 0;
             state->lastsrc = 0;
+            ambe_hw_reset_call(0);
             state->gi[0] = -1;
             state->payload_algid = 0;
             state->payload_keyid = 0;
@@ -479,6 +476,7 @@ void p25_lcw (dsd_opts * opts, dsd_state * state, uint8_t LCW_bits[], uint8_t ir
     {
       uint32_t src = (uint32_t)ConvertBitIntoBytes(&LCW_bits[48], 24);
       fprintf (stderr, " MFID90 (Moto) Talker EOT; SRC: %d;", src);
+      p25_talker_alias_reset(state, 0);
     }
 
     //look for these in logs

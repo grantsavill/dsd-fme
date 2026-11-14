@@ -14,6 +14,844 @@
 
 #include "dsd.h"
 #define PCLEAR_TUNE_AWAY //disable if slower return is preferred
+#define DMR_T3_ACTIVE_MAX     31
+#define DMR_T3_ACTIVE_TIMEOUT 10
+
+static uint32_t s_t3_active_tgt[DMR_T3_ACTIVE_MAX];
+static uint32_t s_t3_active_src[DMR_T3_ACTIVE_MAX];
+static time_t   s_t3_active_grant_time[DMR_T3_ACTIVE_MAX];
+static uint8_t  s_t3_active_logged[DMR_T3_ACTIVE_MAX];
+static uint8_t  s_t3_active_cm_seen[DMR_T3_ACTIVE_MAX];
+static uint8_t  s_t3_active_cm_miss[DMR_T3_ACTIVE_MAX];
+static char     s_t3_active_kind[DMR_T3_ACTIVE_MAX][12];
+static int      s_capmax_cc_seen = 0;
+static int      s_capmax_status_slot = -1;
+static int      s_capmax_slot_aloha_cnt = 0;
+static int      s_capmax_non_status_csbks = 0;
+static uint16_t s_last_pclear_lpcn = 0;
+static uint8_t  s_last_pclear_slot = 0;
+static time_t   s_last_pclear_time = 0;
+static uint16_t s_last_cm_tune_lpcn = 0;
+static uint8_t  s_last_cm_tune_slot = 0;
+static uint16_t s_last_cm_tune_tg   = 0;
+static time_t   s_last_cm_tune_time = 0;
+#define DMR_CAP_ACTIVE_MISS_LIMIT 6
+#define DMR_CAP_PRIV_MIN_MS 1500
+static uint8_t  s_cap_active_miss[17];
+static uint8_t  s_cap_active_present = 0;
+static uint8_t  s_cap_mbc_valid[2] = {0, 0};
+static struct timespec s_cap_priv_start[17];
+static uint16_t s_cap_priv_tg[17];
+static uint8_t  s_cap_priv_active[17];
+static uint8_t  s_cap_priv_miss[17];
+
+static void
+dmr_active_channel_reset_rows (dsd_state * state)
+{
+  if (state == NULL)
+    return;
+  memset (state->active_channel, 0, sizeof(state->active_channel));
+  memset (state->dmr_t3_active_chan, 0, sizeof(state->dmr_t3_active_chan));
+  memset (state->dmr_t3_active_slot, 0, sizeof(state->dmr_t3_active_slot));
+  memset (state->dmr_t3_active_time, 0, sizeof(state->dmr_t3_active_time));
+  memset (s_t3_active_tgt, 0, sizeof(s_t3_active_tgt));
+  memset (s_t3_active_src, 0, sizeof(s_t3_active_src));
+  memset (s_t3_active_grant_time, 0, sizeof(s_t3_active_grant_time));
+  memset (s_t3_active_logged, 0, sizeof(s_t3_active_logged));
+  memset (s_t3_active_cm_seen, 0, sizeof(s_t3_active_cm_seen));
+  memset (s_t3_active_cm_miss, 0, sizeof(s_t3_active_cm_miss));
+  memset (s_t3_active_kind, 0, sizeof(s_t3_active_kind));
+  s_capmax_slot_aloha_cnt = 0;
+  s_capmax_non_status_csbks = 0;
+  memset (s_cap_active_miss, 0, sizeof(s_cap_active_miss));
+  s_cap_active_present = 0;
+  memset (s_cap_priv_start, 0, sizeof(s_cap_priv_start));
+  memset (s_cap_priv_tg, 0, sizeof(s_cap_priv_tg));
+  memset (s_cap_priv_active, 0, sizeof(s_cap_priv_active));
+  memset (s_cap_priv_miss, 0, sizeof(s_cap_priv_miss));
+}
+
+void
+dmr_active_channel_clear (dsd_state * state)
+{
+  if (state == NULL)
+    return;
+  int cur_lpcn = trunk_get_t3_vc_lpcn ();
+  if (cur_lpcn > 0)
+  {
+    s_last_pclear_lpcn = (uint16_t)cur_lpcn;
+    s_last_pclear_slot = 2;
+    s_last_pclear_time = time(NULL);
+    trunk_set_t3_vc_lpcn (0);
+  }
+  if (state->dmr_t3_syscode == 0)
+  {
+    s_capmax_cc_seen = 0;
+    s_capmax_status_slot = -1;
+  }
+  dmr_active_channel_reset_rows (state);
+}
+
+static int
+dmr_t3_active_has_entries (const dsd_state * state)
+{
+  for (int i = 0; i < DMR_T3_ACTIVE_MAX; i++)
+  {
+    if (state->dmr_t3_active_chan[i] != 0)
+      return 1;
+  }
+  return 0;
+}
+
+static void
+dmr_t3_active_clear_if_present (dsd_state * state)
+{
+  if (dmr_t3_active_has_entries (state))
+    dmr_active_channel_reset_rows (state);
+}
+
+static void
+dmr_t3_active_clear_entry (dsd_state * state, int idx)
+{
+  state->active_channel[idx][0] = '\0';
+  state->dmr_t3_active_chan[idx] = 0;
+  state->dmr_t3_active_slot[idx] = 0;
+  state->dmr_t3_active_time[idx] = 0;
+  s_t3_active_tgt[idx] = 0;
+  s_t3_active_src[idx] = 0;
+  s_t3_active_grant_time[idx] = 0;
+  s_t3_active_logged[idx] = 0;
+  s_t3_active_cm_seen[idx] = 0;
+  s_t3_active_cm_miss[idx] = 0;
+  s_t3_active_kind[idx][0] = '\0';
+}
+
+static void
+dmr_t3_active_move_entry (dsd_state * state, int dst, int src)
+{
+  memcpy (state->active_channel[dst], state->active_channel[src], sizeof(state->active_channel[dst]));
+  state->dmr_t3_active_chan[dst] = state->dmr_t3_active_chan[src];
+  state->dmr_t3_active_slot[dst] = state->dmr_t3_active_slot[src];
+  state->dmr_t3_active_time[dst] = state->dmr_t3_active_time[src];
+  s_t3_active_tgt[dst] = s_t3_active_tgt[src];
+  s_t3_active_src[dst] = s_t3_active_src[src];
+  s_t3_active_grant_time[dst] = s_t3_active_grant_time[src];
+  s_t3_active_logged[dst] = s_t3_active_logged[src];
+  s_t3_active_cm_seen[dst] = s_t3_active_cm_seen[src];
+  s_t3_active_cm_miss[dst] = s_t3_active_cm_miss[src];
+  memcpy (s_t3_active_kind[dst], s_t3_active_kind[src], sizeof(s_t3_active_kind[dst]));
+}
+
+static void
+dmr_t3_active_write_entry (dsd_state * state, int idx, uint16_t key_chan, uint16_t disp_chan,
+                           uint8_t slot, const char * ch_kind, uint32_t target, uint32_t source,
+                           time_t now, int is_grant, uint8_t logged)
+{
+  snprintf (state->active_channel[idx], sizeof(state->active_channel[idx]),
+            "Active Ch: %4u TS%u %-9s TGT: %u",
+            disp_chan, slot + 1, ch_kind, target);
+  state->dmr_t3_active_chan[idx] = key_chan;
+  state->dmr_t3_active_slot[idx] = slot;
+  state->dmr_t3_active_time[idx] = now;
+  s_t3_active_tgt[idx] = target;
+  s_t3_active_src[idx] = source;
+  if (is_grant)
+    s_t3_active_grant_time[idx] = now;
+  else
+  {
+    s_t3_active_cm_seen[idx] = 1;
+    s_t3_active_cm_miss[idx] = 0;
+  }
+  s_t3_active_logged[idx] = logged;
+  snprintf (s_t3_active_kind[idx], sizeof(s_t3_active_kind[idx]), "%s", ch_kind);
+}
+
+// Prune expired active_channel entries. Tier III entries expire independently per
+// (channel, slot) after DMR_T3_ACTIVE_TIMEOUT seconds when not tuned to that voice
+// channel; other DMR systems retain the 3-second global timeout.
+void
+dmr_t3_active_expire (const dsd_opts * opts, dsd_state * state, time_t now)
+{
+  int has_t3 = 0;
+  for (int i = 0; i < DMR_T3_ACTIVE_MAX; i++)
+  {
+    if (state->dmr_t3_active_chan[i] != 0)
+    {
+      if (state->active_channel[i][0] == '\0')
+        dmr_t3_active_clear_entry (state, i);
+      else
+        has_t3 = 1;
+    }
+  }
+
+  int is_t3 = (has_t3 || state->dmr_t3_syscode != 0 || strncmp (state->dmr_site_parms, "TIII", 4) == 0);
+  int global_stale = (((now - state->last_active_time) > 3) && ((now - state->last_vc_sync_time) > 3));
+
+  if (!is_t3)
+  {
+    if (global_stale)
+    {
+      dmr_active_channel_clear (state);
+      state->dmr_neighbor_count = 0;
+    }
+    return;
+  }
+
+  int on_vc = ((now - state->last_vc_sync_time) <= 2);
+  if ((opts != NULL && opts->p25_is_tuned == 1) || (on_vc && (now - state->last_active_time) > 1))
+  {
+    dmr_active_channel_reset_rows (state);
+    return;
+  }
+
+  for (int i = 0; i < DMR_T3_ACTIVE_MAX; i++)
+  {
+    if (state->dmr_t3_active_chan[i] == 0)
+    {
+      if (global_stale && state->active_channel[i][0] != '\0')
+        state->active_channel[i][0] = '\0';
+      continue;
+    }
+    if ((now - state->dmr_t3_active_time[i]) > DMR_T3_ACTIVE_TIMEOUT)
+      dmr_t3_active_clear_entry (state, i);
+  }
+}
+
+// Key Tier III active_channel rows by (channel, slot) in sorted order so calls on different RF channels do not overwrite each other.
+static void
+dmr_t3_active_set (dsd_state * state, uint16_t disp_chan, uint8_t slot,
+                   const char * ch_kind, uint32_t target, uint32_t source, time_t now, int is_grant)
+{
+  uint16_t key_chan = (disp_chan != 0) ? disp_chan : 0xFFF;
+  slot &= 1;
+
+  if (is_grant)
+  {
+    if (disp_chan == s_last_pclear_lpcn && (s_last_pclear_slot == slot || s_last_pclear_slot == 2))
+      s_last_pclear_time = 0;
+    if (disp_chan == s_last_cm_tune_lpcn && s_last_cm_tune_slot == slot)
+      s_last_cm_tune_time = 0;
+  }
+
+  for (int i = 0; i < DMR_T3_ACTIVE_MAX; i++)
+  {
+    if (state->dmr_t3_active_chan[i] == key_chan && state->dmr_t3_active_slot[i] == slot)
+    {
+      uint8_t logged = 0;
+      if (s_t3_active_tgt[i] == target && (now - state->dmr_t3_active_time[i]) <= 3)
+        logged = s_t3_active_logged[i];
+      else
+      {
+        s_t3_active_cm_seen[i] = 0;
+        s_t3_active_cm_miss[i] = 0;
+      }
+      if (!is_grant && s_t3_active_tgt[i] == target)
+      {
+        source = s_t3_active_src[i];
+        if (s_t3_active_kind[i][0] != '\0')
+          ch_kind = s_t3_active_kind[i];
+      }
+      dmr_t3_active_write_entry (state, i, key_chan, disp_chan, slot, ch_kind, target, source, now, is_grant, logged);
+      return;
+    }
+  }
+
+  int n = 0;
+  for (int i = 0; i < DMR_T3_ACTIVE_MAX; i++)
+  {
+    if (state->dmr_t3_active_chan[i] != 0)
+    {
+      if (n != i)
+      {
+        dmr_t3_active_move_entry (state, n, i);
+        dmr_t3_active_clear_entry (state, i);
+      }
+      n++;
+    }
+    else if (state->active_channel[i][0] != '\0')
+    {
+      state->active_channel[i][0] = '\0';
+    }
+  }
+
+  if (n == DMR_T3_ACTIVE_MAX)
+  {
+    int oldest = 0;
+    for (int i = 1; i < n; i++)
+    {
+      if (state->dmr_t3_active_time[i] < state->dmr_t3_active_time[oldest])
+        oldest = i;
+    }
+    for (int i = oldest; i < n - 1; i++)
+      dmr_t3_active_move_entry (state, i, i + 1);
+    n--;
+    dmr_t3_active_clear_entry (state, n);
+  }
+
+  int ins = 0;
+  while (ins < n &&
+         (state->dmr_t3_active_chan[ins] < key_chan ||
+          (state->dmr_t3_active_chan[ins] == key_chan && state->dmr_t3_active_slot[ins] < slot)))
+  {
+    ins++;
+  }
+
+  for (int i = n; i > ins; i--)
+    dmr_t3_active_move_entry (state, i, i - 1);
+
+  dmr_t3_active_clear_entry (state, ins);
+  dmr_t3_active_write_entry (state, ins, key_chan, disp_chan, slot, ch_kind, target, source, now, is_grant, 0);
+}
+
+static void
+dmr_t3_active_clear_slot_lpcn (dsd_state * state, uint16_t disp_chan, uint8_t slot, time_t now)
+{
+  uint16_t key_chan = (disp_chan != 0) ? disp_chan : 0xFFF;
+  slot &= 1;
+  for (int i = 0; i < DMR_T3_ACTIVE_MAX; i++)
+  {
+    if (state->dmr_t3_active_chan[i] == key_chan && state->dmr_t3_active_slot[i] == slot)
+    {
+      if (s_t3_active_cm_seen[i] || (now - s_t3_active_grant_time[i]) > 1)
+        dmr_t3_active_clear_entry (state, i);
+    }
+  }
+}
+
+static uint32_t
+dmr_t3_active_get_src (const dsd_state * state, uint16_t disp_chan, uint8_t slot, uint32_t target, time_t now)
+{
+  uint16_t key_chan = (disp_chan != 0) ? disp_chan : 0xFFF;
+  slot &= 1;
+  for (int i = 0; i < DMR_T3_ACTIVE_MAX; i++)
+  {
+    if (state->dmr_t3_active_chan[i] == key_chan &&
+        state->dmr_t3_active_slot[i] == slot &&
+        s_t3_active_tgt[i] == target &&
+        (now - s_t3_active_grant_time[i]) <= 2)
+      return s_t3_active_src[i];
+  }
+  return 0;
+}
+
+static int
+dmr_t3_active_is_logged (const dsd_state * state, uint16_t disp_chan, uint8_t slot, uint32_t target)
+{
+  uint16_t key_chan = (disp_chan != 0) ? disp_chan : 0xFFF;
+  slot &= 1;
+  for (int i = 0; i < DMR_T3_ACTIVE_MAX; i++)
+  {
+    if (state->dmr_t3_active_chan[i] == key_chan &&
+        state->dmr_t3_active_slot[i] == slot &&
+        s_t3_active_tgt[i] == target)
+      return s_t3_active_logged[i];
+  }
+  return 0;
+}
+
+static void
+dmr_t3_active_mark_logged (const dsd_state * state, uint16_t disp_chan, uint8_t slot, uint32_t target)
+{
+  uint16_t key_chan = (disp_chan != 0) ? disp_chan : 0xFFF;
+  slot &= 1;
+  for (int i = 0; i < DMR_T3_ACTIVE_MAX; i++)
+  {
+    if (state->dmr_t3_active_chan[i] == key_chan &&
+        state->dmr_t3_active_slot[i] == slot &&
+        s_t3_active_tgt[i] == target)
+    {
+      s_t3_active_logged[i] = 1;
+      return;
+    }
+  }
+}
+
+static int
+dmr_log_t3_grant_event (dsd_opts * opts, dsd_state * state, uint8_t lcn, uint16_t disp_chan,
+                        int csbk_o, int st2, int is_btv, uint32_t target, time_t now)
+{
+  if (opts == NULL || state == NULL || target == 0)
+    return 0;
+
+  uint8_t slot = lcn & 1;
+  int slot_busy = (slot == 0) ? (state->lastsrc != 0 || state->lasttg != 0)
+                              : (state->lastsrcR != 0 || state->lasttgR != 0);
+  if (slot_busy)
+  {
+    uint8_t cc_slot = (uint8_t)(state->currentslot & 1);
+    int cc_busy = (cc_slot == 0) ? (state->lastsrc != 0 || state->lasttg != 0)
+                                 : (state->lastsrcR != 0 || state->lasttgR != 0);
+    if (cc_busy)
+      return 0;
+    slot = cc_slot;
+  }
+
+  for (int s = 0; s < 2; s++)
+  {
+    const Event_History * eh1 = &state->event_history_s[s].Event_History_Items[1];
+    if (eh1->target_id == target &&
+        eh1->event_time != 0 && (now - eh1->event_time) <= 2)
+      return 1;
+  }
+
+  watchdog_event_history (opts, state, slot);
+
+  int8_t prev_gi = state->gi[slot];
+  uint8_t prev_ht = state->dmr_hangtime[slot];
+  state->gi[slot] = (csbk_o == 49 || csbk_o == 50) ? 0 : 1;
+  state->dmr_hangtime[slot] = 1;
+  if (slot == 0)
+  {
+    unsigned int prev_so = state->dmr_so;
+    unsigned int prev_fid = state->dmr_fid;
+    unsigned int prev_alg = state->payload_algid;
+    unsigned int prev_kid = state->payload_keyid;
+    unsigned long long int prev_mi = state->payload_mi;
+    state->lasttg = target;
+    state->lastsrc = DMR_CC_GRANT_SRC;
+    state->dmr_fid = 0;
+    state->dmr_so = (is_btv ? 0x08 : 0) | (st2 ? 0x80 : 0);
+    state->payload_algid = 0;
+    state->payload_keyid = 0;
+    state->payload_mi = 0;
+    watchdog_event_current (opts, state, 0);
+    state->event_history_s[0].Event_History_Items[0].channel = disp_chan;
+    state->lasttg = 0;
+    state->lastsrc = 0;
+    state->dmr_so = prev_so;
+    state->dmr_fid = prev_fid;
+    state->payload_algid = prev_alg;
+    state->payload_keyid = prev_kid;
+    state->payload_mi = prev_mi;
+  }
+  else
+  {
+    unsigned int prev_so = state->dmr_soR;
+    unsigned int prev_fid = state->dmr_fidR;
+    unsigned int prev_alg = state->payload_algidR;
+    unsigned int prev_kid = state->payload_keyidR;
+    unsigned long long int prev_mi = state->payload_miR;
+    state->lasttgR = target;
+    state->lastsrcR = DMR_CC_GRANT_SRC;
+    state->dmr_fidR = 0;
+    state->dmr_soR = (is_btv ? 0x08 : 0) | (st2 ? 0x80 : 0);
+    state->payload_algidR = 0;
+    state->payload_keyidR = 0;
+    state->payload_miR = 0;
+    watchdog_event_current (opts, state, 1);
+    state->event_history_s[1].Event_History_Items[0].channel = disp_chan;
+    state->lasttgR = 0;
+    state->lastsrcR = 0;
+    state->dmr_soR = prev_so;
+    state->dmr_fidR = prev_fid;
+    state->payload_algidR = prev_alg;
+    state->payload_keyidR = prev_kid;
+    state->payload_miR = prev_mi;
+  }
+  state->dmr_hangtime[slot] = prev_ht;
+  state->gi[slot] = prev_gi;
+
+  watchdog_event_history (opts, state, slot);
+  return 1;
+}
+
+static void
+dmr_csbk_clear_active_slot (dsd_state * state)
+{
+  uint8_t slot = (uint8_t)(state->currentslot & 1);
+  int cur_lpcn = trunk_get_t3_vc_lpcn ();
+  if (cur_lpcn > 0)
+  {
+    s_last_pclear_lpcn = (uint16_t)cur_lpcn;
+    s_last_pclear_slot = slot;
+    s_last_pclear_time = time(NULL);
+  }
+  if (!dmr_t3_active_has_entries (state))
+  {
+    state->active_channel[slot][0] = '\0';
+    return;
+  }
+
+  for (int i = 0; i < DMR_T3_ACTIVE_MAX; i++)
+  {
+    if (state->dmr_t3_active_chan[i] != 0 &&
+        state->dmr_t3_active_slot[i] == slot &&
+        (cur_lpcn == 0 || state->dmr_t3_active_chan[i] == (uint16_t)cur_lpcn))
+      dmr_t3_active_clear_entry (state, i);
+  }
+}
+
+// Format Tier III voice grant call_string with consistent column alignment.
+static void
+dmr_csbk_set_call_string (dsd_state * state, uint8_t slot, int csbk_o, int st2, int is_btv, int is_dx)
+{
+  const char * kind = (csbk_o == 49) ? "Group" : "Private";
+  const char * mod = st2 ? "Emergency" : (is_btv ? "Broadcast" : (is_dx ? "Duplex" : ""));
+  dsd_set_call_string (state, slot, kind, mod);
+}
+
+// Initialize per-slot call metadata when tuning onto a Tier III voice grant.
+static void
+dmr_t3_grant_init_slot (dsd_state * state, uint8_t lcn, int data_call, int csbk_o,
+                        int st2, int is_btv, int is_dx, uint32_t target, uint32_t source)
+{
+  if (data_call != 0)
+    return;
+  if (lcn == 0)
+  {
+    state->lasttg = target;
+    state->lastsrc = source;
+    state->gi[0] = (csbk_o == 49) ? 0 : 1;
+    state->dmr_bcast_tg[0] = is_btv ? target : 0;
+    state->dmr_hangtime[0] = 0;
+    state->dmr_fid = 0;
+    state->dmr_so = (is_btv ? 0x08 : 0) | (st2 ? 0x80 : 0);
+    dmr_csbk_set_call_string (state, 0, csbk_o, st2, is_btv, is_dx);
+  }
+  else if (lcn == 1)
+  {
+    state->lasttgR = target;
+    state->lastsrcR = source;
+    state->gi[1] = (csbk_o == 49) ? 0 : 1;
+    state->dmr_bcast_tg[1] = is_btv ? target : 0;
+    state->dmr_hangtime[1] = 0;
+    state->dmr_fidR = 0;
+    state->dmr_soR = (is_btv ? 0x08 : 0) | (st2 ? 0x80 : 0);
+    dmr_csbk_set_call_string (state, 1, csbk_o, st2, is_btv, is_dx);
+  }
+}
+
+// Clear stale per-slot call metadata when tuning onto a different Tier III RF channel.
+static void
+dmr_csbk_clear_both_slots (dsd_state * state)
+{
+  state->lasttg = 0;
+  state->lastsrc = 0;
+  state->lasttgR = 0;
+  state->lastsrcR = 0;
+  state->dmr_so = 0;
+  state->dmr_soR = 0;
+  state->dmr_fid = 0;
+  state->dmr_fidR = 0;
+  state->dmr_bcast_tg[0] = 0;
+  state->dmr_bcast_tg[1] = 0;
+  state->dmr_hangtime[0] = 0;
+  state->dmr_hangtime[1] = 0;
+  state->dmrburstL = 9;
+  state->dmrburstR = 9;
+  sprintf (state->call_string[0], "%s", "                     ");
+  sprintf (state->call_string[1], "%s", "                     ");
+  dmr_talker_alias_reset (state, 0);
+  dmr_talker_alias_reset (state, 1);
+}
+
+// Print 7-bit DMR Service Options flags to stderr and optionally append to out_buf.
+static void
+dmr_print_svc_opt_flags (uint8_t svc_opt, char * out_buf, size_t out_sz)
+{
+  const char * svc_flags[6] = {NULL};
+  int nf = 0;
+  if (svc_opt & 0x40) svc_flags[nf++] = "Emergency; ";
+  if (svc_opt & 0x20) svc_flags[nf++] = "Encrypted; ";
+  if (svc_opt & 0x10) svc_flags[nf++] = "Supp Data; ";
+  if (svc_opt & 0x08) svc_flags[nf++] = "Broadcast; ";
+  if (svc_opt & 0x04) svc_flags[nf++] = "OVCM; ";
+  if      ((svc_opt & 0x03) == 1) svc_flags[nf++] = "Priority 1; ";
+  else if ((svc_opt & 0x03) == 2) svc_flags[nf++] = "Priority 2; ";
+  else if ((svc_opt & 0x03) == 3) svc_flags[nf++] = "Priority 3; ";
+  for (int i = 0; i < nf; i++)
+  {
+    fprintf (stderr, "%s", svc_flags[i]);
+    if (out_buf != NULL && strlen (out_buf) + strlen (svc_flags[i]) < out_sz)
+      strcat (out_buf, svc_flags[i]);
+  }
+}
+
+// Format an ETSI TS 102 361-4 Table A.1 call timer token into seconds or "Inf".
+static void
+dmr_format_timer_val (char * buf, size_t sz, uint16_t val, uint16_t inf_val, int step_s)
+{
+  if (val == 0)
+    snprintf (buf, sz, "0s");
+  else if (val == inf_val)
+    snprintf (buf, sz, "Inf");
+  else
+    snprintf (buf, sz, "%ds", (int)val * step_s);
+}
+
+// Map common ETSI TS 102 361-4 clause 7.2.7 Reason_Code values to short text.
+static const char *
+dmr_t3_ack_reason_str (uint8_t reason_code)
+{
+  switch (reason_code)
+  {
+    case 0x00: return "MS Not Supported";
+    case 0x01: return "Line Not Supported";
+    case 0x02: return "Stack Full";
+    case 0x03: return "Equip Busy";
+    case 0x04: return "Recipient Refused";
+    case 0x05: return "Custom Refused";
+    case 0x06: return "Duplex Not Supported";
+    case 0x10: return "System Busy";
+    case 0x11: return "System Not Ready";
+    case 0x12: return "Call Cancelled";
+    case 0x13: return "Reg Refused";
+    case 0x14: return "Reg Denied";
+    case 0x15: return "MS Not Registered";
+    case 0x16: return "Called Unit Busy";
+    case 0x17: return "Called Group Busy";
+    case 0x18: return "Invalid CRC";
+    case 0x1F: return "Refused";
+    case 0x20: return "Not Supported/Refused";
+    case 0x21: return "Permitted Only/Denied";
+    case 0x25: return "MS Not Registered";
+    case 0x27: return "Called Unit Busy";
+    case 0x2A: return "Call Cancelled";
+    case 0x40: return "Message Accepted";
+    case 0x41: return "Callback";
+    case 0x42: return "Status Accepted";
+    case 0x44: return "Auth Response";
+    case 0x60: return "Message Accepted";
+    case 0x61: return "Callback";
+    case 0x62: return "Reg Accepted";
+    case 0x63: return "Ahoy";
+    case 0x80: return "Queued for Resource";
+    case 0x81: return "Queued for Busy Target";
+    case 0xA0: return "Queued for Resource";
+    case 0xA1: return "Queued for Busy Target";
+    case 0xC0: return "Wait";
+    case 0xE0: return "Wait";
+    default:   return NULL;
+  }
+}
+
+// Extract network model, net/site IDs, and default DMRLA bit split from a 14-bit TIII syscode.
+void
+dmr_parse_t3_syscode (uint16_t syscode, uint16_t * net_out, uint16_t * site_out,
+                      uint16_t * def_n_out, char * model_str, size_t model_sz)
+{
+  static const uint8_t net_bits[4]  = {9, 7, 4, 2};
+  static const uint8_t site_bits[4] = {3, 5, 8, 10};
+  static const char * const model_names[4] = {"Tiny", "Small", "Large", "Huge"};
+
+  uint8_t model = (uint8_t)((syscode >> 12) & 0x3);
+  uint8_t sb = site_bits[model];
+  *net_out   = (uint16_t)((syscode >> sb) & ((1U << net_bits[model]) - 1U));
+  *site_out  = (uint16_t)(syscode & ((1U << sb) - 1U));
+  *def_n_out = sb;
+  if (model_str != NULL && model_sz > 0)
+    snprintf (model_str, model_sz, "%s", model_names[model]);
+}
+
+// Pack 2-bit Tier III network model and 9-bit net ID into a non-zero net key.
+static uint16_t
+dmr_t3_net_key (uint16_t syscode, uint16_t net)
+{
+  uint8_t model = (uint8_t)((syscode >> 12) & 0x3);
+  return (uint16_t)(0x8000U | ((uint16_t)model << 10) | (net & 0x03FFU));
+}
+
+// Test whether splitting seen site IDs at bit boundary cand_n yields contiguous Areas,
+// contiguous global sub-site offsets, and zero internal holes within each Area.
+static int
+dmr_t3_split_is_contiguous (const uint16_t * sites, uint8_t count, uint16_t cand_n)
+{
+  uint16_t sub_mask = (uint16_t)((1U << cand_n) - 1U);
+  uint16_t a_vals[64];
+  uint16_t a_min_b[64];
+  uint16_t a_max_b[64];
+  int a_cnt[64];
+  uint16_t b_vals[64];
+  int uniq_a = 0, uniq_b = 0;
+  uint16_t min_a = 0xFFFFU, max_a = 0;
+  uint16_t min_b = 0xFFFFU, max_b = 0;
+
+  for (uint8_t i = 0; i < count; i++)
+  {
+    uint16_t a = (uint16_t)(sites[i] >> cand_n);
+    uint16_t b = (uint16_t)(sites[i] & sub_mask);
+    if (a < min_a) min_a = a;
+    if (a > max_a) max_a = a;
+    if (b < min_b) min_b = b;
+    if (b > max_b) max_b = b;
+
+    int seen_b = 0;
+    for (int j = 0; j < uniq_b; j++)
+    {
+      if (b_vals[j] == b)
+      {
+        seen_b = 1;
+        break;
+      }
+    }
+    if (!seen_b)
+      b_vals[uniq_b++] = b;
+
+    int found = -1;
+    for (int j = 0; j < uniq_a; j++)
+    {
+      if (a_vals[j] == a)
+      {
+        found = j;
+        break;
+      }
+    }
+    if (found < 0)
+    {
+      a_vals[uniq_a] = a;
+      a_min_b[uniq_a] = b;
+      a_max_b[uniq_a] = b;
+      a_cnt[uniq_a] = 1;
+      uniq_a++;
+    }
+    else
+    {
+      a_cnt[found]++;
+      if (b < a_min_b[found])
+        a_min_b[found] = b;
+      if (b > a_max_b[found])
+        a_max_b[found] = b;
+    }
+  }
+
+  if (uniq_a < 2 || min_a > 1 || min_b > 1)
+    return 0;
+  if ((int)max_a - (int)min_a + 1 != uniq_a)
+    return 0;
+  if ((int)max_b - (int)min_b + 1 != uniq_b)
+    return 0;
+
+  for (int j = 0; j < uniq_a; j++)
+  {
+    if ((int)a_max_b[j] - (int)a_min_b[j] + 1 != a_cnt[j])
+      return 0;
+  }
+  return 1;
+}
+
+// Record an observed Tier III syscode for the active (model, net) and infer best DMRLA split n.
+void
+dmr_record_t3_syscode (dsd_state * state, uint16_t syscode, int is_neighbor)
+{
+  if (state == NULL || syscode == 0)
+    return;
+
+  uint16_t net = 0, site = 0, def_n = 1;
+  dmr_parse_t3_syscode (syscode, &net, &site, &def_n, NULL, 0);
+  uint16_t net_key = dmr_t3_net_key (syscode, net);
+
+  if (!is_neighbor && state->dmr_t3_net_key != net_key)
+  {
+    state->dmr_t3_net_key = net_key;
+    state->dmr_t3_seen_count = 0;
+    state->dmr_t3_auto_n = (uint8_t)def_n;
+  }
+  else if (is_neighbor && state->dmr_t3_net_key != net_key)
+  {
+    return;
+  }
+
+  for (uint8_t i = 0; i < state->dmr_t3_seen_count; i++)
+  {
+    if (state->dmr_t3_seen_sites[i] == site)
+      return;
+  }
+  if (state->dmr_t3_seen_count >= sizeof(state->dmr_t3_seen_sites) / sizeof(state->dmr_t3_seen_sites[0]))
+    return;
+
+  state->dmr_t3_seen_sites[state->dmr_t3_seen_count++] = site;
+
+  if (state->dmr_t3_seen_count < 2)
+  {
+    state->dmr_t3_auto_n = (uint8_t)def_n;
+    return;
+  }
+
+  uint8_t best_n = (uint8_t)def_n;
+  for (uint16_t cand_n = 1; cand_n < def_n; cand_n++)
+  {
+    if (dmr_t3_split_is_contiguous (state->dmr_t3_seen_sites, state->dmr_t3_seen_count, cand_n))
+      best_n = (uint8_t)cand_n;
+  }
+  state->dmr_t3_auto_n = best_n;
+}
+
+// Return the effective DMRLA split n for a Tier III syscode (manual override, CapMax=0, or auto-inferred).
+uint16_t
+dmr_effective_t3_n (const dsd_opts * opts, const dsd_state * state,
+                    uint16_t syscode, uint16_t def_n, int is_capmax)
+{
+  if (opts != NULL && opts->dmr_dmrla_is_set == 1)
+    return (opts->dmr_dmrla_n > def_n) ? def_n : opts->dmr_dmrla_n;
+  if (is_capmax || (state != NULL && strcmp (state->dmr_branding, "Motorola") == 0))
+    return 0;
+  if (state != NULL && syscode != 0)
+  {
+    uint16_t net = 0, site = 0, parsed_def_n = 1;
+    dmr_parse_t3_syscode (syscode, &net, &site, &parsed_def_n, NULL, 0);
+    uint16_t net_key = dmr_t3_net_key (syscode, net);
+    if (state->dmr_t3_net_key == net_key && state->dmr_t3_auto_n >= 1 && state->dmr_t3_auto_n <= def_n)
+      return state->dmr_t3_auto_n;
+  }
+  return def_n;
+}
+
+// Insert a unique neighbor Tier III syscode or site ID in ascending order.
+static void
+dmr_add_neighbor (dsd_state * state, uint16_t syscode)
+{
+  if (state == NULL || syscode == 0 || (state->dmr_t3_syscode != 0 && syscode == state->dmr_t3_syscode))
+    return;
+
+  uint8_t max_nb = (uint8_t)(sizeof(state->dmr_neighbors) / sizeof(state->dmr_neighbors[0]));
+  uint8_t ins = 0;
+  while (ins < state->dmr_neighbor_count && state->dmr_neighbors[ins] < syscode)
+    ins++;
+  if (ins < state->dmr_neighbor_count && state->dmr_neighbors[ins] == syscode)
+    return;
+  if (state->dmr_neighbor_count >= max_nb)
+    return;
+
+  for (uint8_t i = state->dmr_neighbor_count; i > ins; i--)
+    state->dmr_neighbors[i] = state->dmr_neighbors[i - 1];
+  state->dmr_neighbors[ins] = syscode;
+  state->dmr_neighbor_count++;
+}
+
+// Reformat state->dmr_site_parms from the stored Tier III syscode using current DMRLA settings.
+void
+dmr_refresh_t3_site_parms (dsd_opts * opts, dsd_state * state)
+{
+  if (opts == NULL || state == NULL)
+    return;
+  if (state->dmr_t3_syscode == 0 && strncmp (state->dmr_site_parms, "TIII", 4) != 0)
+    return;
+
+  uint16_t net = 0, site = 0, n = 1;
+  dmr_parse_t3_syscode ((uint16_t)state->dmr_t3_syscode, &net, &site, &n, NULL, 0);
+  n = dmr_effective_t3_n (opts, state, (uint16_t)state->dmr_t3_syscode, n, 0);
+
+  uint16_t sub_mask = (n == 0) ? 0 : (uint16_t)((1U << n) - 1);
+  if (opts->dmr_dmrla_is_set == 1)
+  {
+    if (n != 0)
+      snprintf (state->dmr_site_parms, sizeof(state->dmr_site_parms),
+                "TIII %d-%d.%d [%d]; ", net + 1, (site >> n) + 1, (site & sub_mask) + 1, n);
+    else
+      snprintf (state->dmr_site_parms, sizeof(state->dmr_site_parms),
+                "TIII %d-%d [0]; ", net, site);
+  }
+  else
+  {
+    if (n != 0)
+      snprintf (state->dmr_site_parms, sizeof(state->dmr_site_parms),
+                "TIII %d-%d.%d; ", net + 1, (site >> n) + 1, (site & sub_mask) + 1);
+    else
+      snprintf (state->dmr_site_parms, sizeof(state->dmr_site_parms),
+                "TIII %d-%d; ", net, site);
+  }
+}
+
 //function for handling Control Signalling PDUs (CSBK, MBC) messages
 void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8_t cs_pdu[], uint32_t CRCCorrect, uint32_t IrrecoverableErrors)
 {
@@ -61,21 +899,26 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
 
   if(IrrecoverableErrors == 0 && CRCCorrect == 1)
   {
+    time_t now = time(NULL);
+
     //clear stale Active Channel messages here
-    if ( ((time(NULL) - state->last_active_time) > 3) && ((time(NULL) - state->last_vc_sync_time) > 3))
-    {
-      memset (state->active_channel, 0, sizeof(state->active_channel));
-    }
+    dmr_t3_active_expire (opts, state, now);
 
     //update time to prevent random 'Control Channel Signal Lost' hopping
     //in the middle of voice call on current Control Channel (con+ and t3)
-    state->last_cc_sync_time = time(NULL);
+    state->last_cc_sync_time = now;
 
     if (csbk_pf == 0) //okay to run
     {
+      if (csbk_fid < 253)
+      {
+        ambe_hw_reset_call(state->currentslot);
+        if (csbk_o != 46 && csbk_o != 47)
+          state->dmr_hangtime[state->currentslot & 1] = 0;
+      }
 
       //set overarching manufacturer in use when non-standard feature id set is up
-      if (csbk_fid != 0) state->dmr_mfid = csbk_fid;
+      if (csbk_fid != 0 && csbk_fid < 253) state->dmr_mfid = csbk_fid;
 
       fprintf (stderr, "%s", KYEL);
 
@@ -92,6 +935,8 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
         long int freq = 0;
 
         //all of these messages share the same format (thankfully)
+        uint8_t is_btv = (csbk_o == 50) ? 1 : 0;
+        uint8_t is_dx  = (csbk_o == 53 || csbk_o == 54) ? 1 : 0;
         if (csbk_o == 48) fprintf (stderr, " Private Voice Channel Grant (PV_GRANT)");
         if (csbk_o == 49) fprintf (stderr, " Talkgroup Voice Channel Grant (TV_GRANT)");
         if (csbk_o == 50) fprintf (stderr, " Broadcast Voice Channel Grant (BTV_GRANT)");  //listed as private in the appendix (error?)
@@ -122,7 +967,7 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
         //target and source are always the same bits
         uint32_t target = (uint32_t)ConvertBitIntoBytes(&cs_pdu_bits[32], 24);
         uint32_t source = (uint32_t)ConvertBitIntoBytes(&cs_pdu_bits[56], 24);
-        UNUSED2(st1, st3);
+        UNUSED(st3);
 
         //broadcast calls show no tgt/src info in ETSI manaual, but seem to correspond with same values in embedded link control
         // if (csbk_o == 50)
@@ -155,6 +1000,7 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
         fprintf (stderr, "  LPCN: %04d; TS: %d; LPCN+TS: %04d; Target: %08d - Source: %08d ", lpchannum, lcn+1, pluschannum, target, source);
 
         if (st2) fprintf (stderr, "Emergency; ");
+        if (st1 && (csbk_o == 51 || csbk_o == 52 || csbk_o == 55 || csbk_o == 56)) fprintf (stderr, "Hi-Rate; ");
 
         //check for special gateway identifiers (probably just on broadcast?)
         dmr_gateway_identifier (source, target);
@@ -203,21 +1049,47 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
           else fprintf (stderr, "\n  Frequency Not Found in Channel Map;");
         }
 
+        int orig_csbk_o = csbk_o;
+        int is_voice_grant = (orig_csbk_o == 48 || orig_csbk_o == 49 || orig_csbk_o == 50 || orig_csbk_o == 53);
+        uint16_t grant_chan = (lpchannum == 0xFFF) ? mbc_lpchannum : lpchannum;
+        int did_tune = 0;
+        int on_grant_freq = 0;
+
         //add active channel string to display
-        if (lpchannum != 0 && lpchannum != 0xFFF)
+        if (lpchannum != 0 && !(csbk_o == 56 && state->synctype == 33))
         {
-          if (csbk_o == 49 || csbk_o == 50) sprintf (state->active_channel[lcn], "Active Group Ch: %d TG: %d; ", lpchannum, target);
-          else if (csbk_o == 51 || csbk_o == 52 || csbk_o == 54 || csbk_o == 55 || csbk_o == 56) sprintf (state->active_channel[lcn], "Active Data Ch: %d TG: %d; ", lpchannum, target);
-          else sprintf (state->active_channel[lcn], "Active Private Ch: %d TG: %d; ", lpchannum, target);
-        }
-        else if (lpchannum == 0xFFF)
-        {
-          if (csbk_o == 49 || csbk_o == 50) sprintf (state->active_channel[lcn], "Active Group Ch: %d TG: %d; ", mbc_lpchannum, target);
-          else if (csbk_o == 51 || csbk_o == 52 || csbk_o == 54 || csbk_o == 55 || csbk_o == 56) sprintf (state->active_channel[lcn], "Active Data Ch: %d TG: %d; ", mbc_lpchannum, target);
-          else sprintf (state->active_channel[lcn], "Active Private Ch: %d TG: %d; ", mbc_lpchannum, target);
+          const char * ch_kind = is_btv ? "Broadcast" :
+                                 (csbk_o == 49) ? "Group" :
+                                 (csbk_o == 51 || csbk_o == 52 || csbk_o == 54 || csbk_o == 55 || csbk_o == 56) ? "Data" :
+                                 (csbk_o == 53) ? "Duplex" : "Private";
+          dmr_t3_active_set (state, grant_chan, lcn, ch_kind, target, source, now, 1);
+          s_capmax_slot_aloha_cnt = 0;
+          s_capmax_non_status_csbks = 0;
         }
         //update last active channel time
-        state->last_active_time = time(NULL);
+        state->last_active_time = now;
+
+        if (is_voice_grant)
+        {
+          long int cur_f = trunk_get_current_freq(opts, state);
+          if (cur_f == 0 && opts->p25_is_tuned == 0)
+            cur_f = state->p25_cc_freq;
+          int same_cc_chan = (opts->p25_is_tuned == 0 && grant_chan != 0 &&
+                              grant_chan == (uint16_t)trunk_get_t3_cc_lpcn(state));
+          on_grant_freq = ((cur_f != 0 && freq == cur_f) || same_cc_chan);
+          int slot_busy = (lcn == 0)
+                            ? (state->dmrburstL == 16 || state->dmrburstL == 0 || state->dmrburstL == 1 ||
+                               state->dmrburstL == 2 || state->dmr_hangtime[0] ||
+                               state->lasttg != 0 || state->lastsrc != 0)
+                            : (state->dmrburstR == 16 || state->dmrburstR == 0 || state->dmrburstR == 1 ||
+                               state->dmrburstR == 2 || state->dmr_hangtime[1] ||
+                               state->lasttgR != 0 || state->lastsrcR != 0);
+          if (!slot_busy && on_grant_freq)
+          {
+            int grant_csbk = (csbk_o == 50) ? 49 : csbk_o;
+            dmr_t3_grant_init_slot (state, lcn, 0, grant_csbk, st2, is_btv, is_dx, target, source);
+          }
+        }
 
         //Skip tuning group calls if group calls are disabled
         if (opts->trunk_tune_group_calls == 0 && csbk_o == 49) goto SKIPCALL; //TV_GRANT
@@ -259,6 +1131,11 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
             //just set to both for now, could go on tslot later
             state->p25_vc_freq[0] = freq;
             state->p25_vc_freq[1] = freq;
+            trunk_set_t3_vc_lpcn((lpchannum == 0xFFF) ? mbc_lpchannum : lpchannum);
+          }
+          if (opts->p25_trunk == 0 && data_call == 0 && (time(NULL) - state->last_vc_sync_time > 2))
+          {
+            state->dmr_bcast_tg[lcn] = is_btv ? target : 0;
           }
 
           //don't tune if currently a vc on the control channel
@@ -292,57 +1169,28 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
                 //RIGCTL
                 if (opts->use_rigctl == 1)
                 {
+                  //Guess I forgot to add this condition here
+                  long int cur_freq = trunk_get_current_freq(opts, state);
+                  if (cur_freq != freq)
+                  {
+                    dmr_reset_blocks (opts, state); //reset all block gathering since we are tuning away from current frequency
+                    dmr_csbk_clear_both_slots (state);
+                    if (opts->setmod_bw != 0 ) SetModulation(opts->rigctl_sockfd, opts->setmod_bw);
+                    SetFreq(opts->rigctl_sockfd, freq);
+                  }
+                  else
+                  {
+                    trunk_update_filter_for_freq(freq);
+                  }
                   //we will want to set these values here, some Tier 3 systems prefer P_Protects (Tait) over VLC and TLC headers
                   //and is faster than waiting on good embedded link control
-                  if (lcn == 0 && data_call == 0)
-                  {
-                    state->lasttg = target;
-                    state->lastsrc = source;
-
-                    //fix call string for per call, etc
-                    sprintf (state->call_string[0], " Trunked "); //catch all
-                    if (csbk_o == 49 || csbk_o == 50)
-                      sprintf (state->call_string[0], "   Group ");
-                    else if (csbk_o == 51 || csbk_o == 52 || csbk_o == 54 || csbk_o == 55 || csbk_o == 56) {} //do nothing
-                    else sprintf (state->call_string[0], " Private ");
-                    if (st2)
-                    {
-                      if (csbk_o == 51 || csbk_o == 52 || csbk_o == 54 || csbk_o == 55 || csbk_o == 56) {} //do nothing
-                      else strcat (state->call_string[0], " Emergency  ");
-                    }
-                    else strcat (state->call_string[0], "            ");
-
-                  }
-
-                  if (lcn == 1 && data_call == 0)
-                  {
-                    state->lasttgR = target;
-                    state->lastsrcR = source;
-
-                    //fix call string for per call, etc
-                    sprintf (state->call_string[1], " Trunked "); //catch all
-                    if (csbk_o == 49 || csbk_o == 50)
-                      sprintf (state->call_string[1], "   Group ");
-                    else if (csbk_o == 51 || csbk_o == 52 || csbk_o == 54 || csbk_o == 55 || csbk_o == 56) {} //do nothing
-                    else sprintf (state->call_string[1], " Private ");
-                    if (st2)
-                    {
-                      if (csbk_o == 51 || csbk_o == 52 || csbk_o == 54 || csbk_o == 55 || csbk_o == 56) {} //do nothing
-                      else strcat (state->call_string[1], " Emergency  ");
-                    }
-                    else strcat (state->call_string[1], "            ");
-
-                  }
-                  //Guess I forgot to add this condition here
-                  if (GetCurrentFreq(opts->rigctl_sockfd) != freq)
-                    dmr_reset_blocks (opts, state); //reset all block gathering since we are tuning away from current frequency
-                  if (opts->setmod_bw != 0 ) SetModulation(opts->rigctl_sockfd, opts->setmod_bw);
-                  if (GetCurrentFreq(opts->rigctl_sockfd) != freq)
-                    SetFreq(opts->rigctl_sockfd, freq);
+                  dmr_t3_grant_init_slot (state, lcn, data_call, csbk_o, st2, is_btv, is_dx, target, source);
                   state->p25_vc_freq[0] = state->p25_vc_freq[1] = freq;
+                  trunk_set_t3_vc_lpcn((lpchannum == 0xFFF) ? mbc_lpchannum : lpchannum);
                   opts->p25_is_tuned = 1; //set to 1 to set as currently tuned so we don't keep tuning nonstop
                   state->last_vc_sync_time = time(NULL);
                   state->last_t3_tune_time = time(NULL); //set here so a random p_clear on the opposite slot doesn't send us back to the CC
+                  did_tune = 1;
 
                 }
 
@@ -350,56 +1198,25 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
                 else if (opts->audio_in_type == 3)
                 {
                   #ifdef USE_RTLSDR
-                  //we will want to set these values here, some Tier 3 systems prefer P_Protects (Tait) over VLC and TLC headers
-                  //and is faster than waiting on good embedded link control
-                  if (lcn == 0 && data_call == 0)
-                  {
-                    state->lasttg = target;
-                    state->lastsrc = source;
-
-                    //fix call string for per call, etc
-                    sprintf (state->call_string[0], " Trunked "); //catch all
-                    if (csbk_o == 49 || csbk_o == 50)
-                      sprintf (state->call_string[0], "   Group ");
-                    else if (csbk_o == 51 || csbk_o == 52 || csbk_o == 54 || csbk_o == 55 || csbk_o == 56) {} //do nothing
-                    else sprintf (state->call_string[0], " Private ");
-                    if (st2)
-                    {
-                      if (csbk_o == 51 || csbk_o == 52 || csbk_o == 54 || csbk_o == 55 || csbk_o == 56) {} //do nothing
-                      else strcat (state->call_string[0], " Emergency  ");
-                    }
-                    else strcat (state->call_string[0], "            ");
-
-                  }
-                  if (lcn == 1 && data_call == 0)
-                  {
-                    state->lasttgR = target;
-                    state->lastsrcR = source;
-
-                    //fix call string for per call, etc
-                    sprintf (state->call_string[1], " Trunked "); //catch all
-                    if (csbk_o == 49 || csbk_o == 50)
-                      sprintf (state->call_string[1], "   Group ");
-                    else if (csbk_o == 51 || csbk_o == 52 || csbk_o == 54 || csbk_o == 55 || csbk_o == 56) {} //do nothing
-                    else sprintf (state->call_string[1], " Private ");
-                    if (st2)
-                    {
-                      if (csbk_o == 51 || csbk_o == 52 || csbk_o == 54 || csbk_o == 55 || csbk_o == 56) {} //do nothing
-                      else strcat (state->call_string[1], " Emergency  ");
-                    }
-                    else strcat (state->call_string[1], "            ");
-
-                  }
                   //Guess I forgot to add this condition here
                   uint32_t tempf = (uint32_t)freq;
                   if (opts->rtlsdr_center_freq != tempf)
+                  {
                     dmr_reset_blocks (opts, state); //reset all block gathering since we are tuning away from current frequency
-                  if (opts->rtlsdr_center_freq != tempf)
+                    dmr_csbk_clear_both_slots (state);
                     rtl_dev_tune (opts, freq);
+                  }
+                  else
+                    trunk_update_filter_for_freq(freq);
+                  //we will want to set these values here, some Tier 3 systems prefer P_Protects (Tait) over VLC and TLC headers
+                  //and is faster than waiting on good embedded link control
+                  dmr_t3_grant_init_slot (state, lcn, data_call, csbk_o, st2, is_btv, is_dx, target, source);
                   state->p25_vc_freq[0] = state->p25_vc_freq[1] = freq;
+                  trunk_set_t3_vc_lpcn((lpchannum == 0xFFF) ? mbc_lpchannum : lpchannum);
                   opts->p25_is_tuned = 1;
                   state->last_vc_sync_time = time(NULL);
                   state->last_t3_tune_time = time(NULL); //set here so a random p_clear on the opposite slot doesn't send us back to the CC
+                  did_tune = 1;
 
                   #endif
                 }
@@ -410,7 +1227,23 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
 
         }
 
-        SKIPCALL: ; //do nothing
+        SKIPCALL: ;
+        if (did_tune)
+        {
+          dmr_active_channel_reset_rows (state);
+        }
+        else if (is_voice_grant && lpchannum != 0 && target != 0)
+        {
+          if (on_grant_freq)
+          {
+            dmr_t3_active_mark_logged (state, grant_chan, lcn, target);
+          }
+          else if (!dmr_t3_active_is_logged (state, grant_chan, lcn, target))
+          {
+            if (dmr_log_t3_grant_event (opts, state, lcn, grant_chan, orig_csbk_o, st2, is_btv, target, now))
+              dmr_t3_active_mark_logged (state, grant_chan, lcn, target);
+          }
+        }
 
       }
 
@@ -419,7 +1252,15 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
       {
         //initial line break
         fprintf (stderr, "\n");
-        fprintf (stderr, " Move (C_MOVE) ");
+        fprintf (stderr, " Move (C_MOVE) - ");
+        uint8_t  move_mask    = (uint8_t)ConvertBitIntoBytes(&cs_pdu_bits[25], 5);
+        uint8_t  move_reg     = cs_pdu_bits[35];
+        uint8_t  move_backoff = (uint8_t)ConvertBitIntoBytes(&cs_pdu_bits[36], 4);
+        uint16_t move_lpcn    = (uint16_t)ConvertBitIntoBytes(&cs_pdu_bits[44], 12);
+        uint32_t move_ms      = (uint32_t)ConvertBitIntoBytes(&cs_pdu_bits[56], 24);
+        fprintf (stderr, "TSCC LPCN: %04d; MS: %08d; Reg: %d; Mask: %02X; Backoff: %d; ",
+                 move_lpcn, move_ms, move_reg, move_mask, move_backoff);
+        dmr_gateway_identifier (0, move_ms);
       }
 
       //Aloha
@@ -430,19 +1271,47 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
 
         dmr_decode_syscode(opts, state, cs_pdu_bits, csbk_fid, 0);
 
+        if (csbk_fid == 0x10)
+        {
+          s_capmax_cc_seen = 1;
+          if (s_capmax_status_slot < 0)
+            s_capmax_status_slot = (int)((state->currentslot & 1) ^ 1);
+        }
+        if (s_capmax_cc_seen && opts->p25_is_tuned == 0 &&
+            (now - state->last_vc_sync_time) > 2 && dmr_t3_active_has_entries (state))
+        {
+          s_capmax_non_status_csbks++;
+          if ((int)(state->currentslot & 1) == s_capmax_status_slot || csbk_fid == 0x00)
+            s_capmax_slot_aloha_cnt++;
+          if (s_capmax_slot_aloha_cnt >= 2 || s_capmax_non_status_csbks >= 8)
+          {
+            for (int i = 0; i < DMR_T3_ACTIVE_MAX; i++)
+            {
+              if (state->dmr_t3_active_chan[i] == 0)
+                continue;
+              if (s_t3_active_cm_seen[i] ||
+                  (strcmp(s_t3_active_kind[i], "Group") == 0 &&
+                   (s_capmax_slot_aloha_cnt >= 3 || (now - s_t3_active_grant_time[i]) > 1)))
+              {
+                dmr_t3_active_clear_entry (state, i);
+              }
+            }
+          }
+        }
+
         //if using rigctl we can set an unknown or updated cc frequency
         //by polling rigctl for the current frequency
         if (opts->use_rigctl == 1 && opts->p25_is_tuned == 0) //&& state->p25_cc_freq == 0
         {
-          ccfreq = GetCurrentFreq (opts->rigctl_sockfd);
-          if (ccfreq != 0) state->p25_cc_freq = ccfreq;
+          ccfreq = trunk_get_current_freq (opts, state);
+          trunk_set_cc_freq_if_valid (opts, state, ccfreq);
         }
 
         //if using rtl input, we can ask for the current frequency tuned
         if (opts->audio_in_type == 3 && opts->p25_is_tuned == 0) //&& state->p25_cc_freq == 0
         {
           ccfreq = (long int)opts->rtlsdr_center_freq;
-          if (ccfreq != 0) state->p25_cc_freq = ccfreq;
+          trunk_set_cc_freq_if_valid (opts, state, ccfreq);
         }
 
         //when on a CC, rotate the symbol out file every hour, if enabled
@@ -468,9 +1337,10 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
         // if (state->currentslot == 0 && (state->dmrburstR == 9 && state->dmrburstR == 7)) clear = 1;
         // if (state->currentslot == 0 && (state->dmrburstL == 9 && state->dmrburstL == 7)) clear = 1;
 
-        //if no voice header, pi header, or voice sync in the opposite slot currently
-        if (state->currentslot == 0 && (state->dmrburstR != 16 && state->dmrburstR != 0 && state->dmrburstR != 1)) clear = 2;
-        if (state->currentslot == 1 && (state->dmrburstL != 16 && state->dmrburstL != 0 && state->dmrburstL != 1)) clear = 3;
+        //if no voice header, pi header, or voice sync in the opposite slot currently (or opposite slot call is blocked/locked-out)
+        int oslot_blocked = trunk_is_dmr_slot_blocked(opts, state, (state->currentslot ^ 1) & 1);
+        if (state->currentslot == 0 && (oslot_blocked || (!state->dmr_hangtime[1] && state->dmrburstR != 16 && state->dmrburstR != 0 && state->dmrburstR != 1))) clear = 2;
+        if (state->currentslot == 1 && (oslot_blocked || (!state->dmr_hangtime[0] && state->dmrburstL != 16 && state->dmrburstL != 0 && state->dmrburstL != 1))) clear = 3;
 
         //if tuning and decoding data is desired, then do a secondary check here for data headers and blocks in the opposite slot
         if (opts->trunk_tune_data_calls == 1)
@@ -486,19 +1356,45 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
 
         //make sure we aren't sent back immediately by an p_clear condition upon first tuning (i.e., random ENC LO, or end of Data Call)
         //one second default on hangtime should be an optimal time, but let it be user configurable with hangtime option
-        if ( time(NULL)-state->last_t3_tune_time < opts->trunk_hangtime) clear = 0;
+        if (csbk_fid != 253 &&
+            !(csbk_fid == 255 && ((state->currentslot == 0 ? state->lasttgR == 0 : state->lasttg == 0) || oslot_blocked)) &&
+            time(NULL)-state->last_t3_tune_time < opts->trunk_hangtime) clear = 0;
 
         //initial line break
         fprintf (stderr, "\n");
         fprintf (stderr, " Clear (P_CLEAR) ");
+        if (csbk_fid < 253 && csbk_fid != 12)
+        {
+          uint16_t pclear_lpcn = (uint16_t)ConvertBitIntoBytes(&cs_pdu_bits[16], 12);
+          uint8_t  pclear_gi   = cs_pdu_bits[31];
+          uint32_t pclear_tgt  = (uint32_t)ConvertBitIntoBytes(&cs_pdu_bits[32], 24);
+          uint32_t pclear_src  = (uint32_t)ConvertBitIntoBytes(&cs_pdu_bits[56], 24);
+          if (pclear_lpcn != 0 || pclear_tgt != 0 || pclear_src != 0)
+          {
+            fprintf (stderr, "- %s; ", pclear_gi ? "Group" : "Private");
+            if (pclear_lpcn != 0 && pclear_lpcn < 0xFFE)
+              fprintf (stderr, "TSCC LPCN: %04d; ", pclear_lpcn);
+            fprintf (stderr, "Target: %08d; Source: %08d; ", pclear_tgt, pclear_src);
+            dmr_gateway_identifier (pclear_src, pclear_tgt);
+          }
+        }
+        int did_pclear_reset = 0;
         #ifdef PCLEAR_TUNE_AWAY
 
         if (opts->p25_trunk == 1)
         {
 
           //check the p_clear logic and report status
-          if      (clear && csbk_fid == 255)  fprintf (stderr, " Slot %d No Encrypted Call Trunking; Slot %d Free; Return to CC; ", pslot, oslot);
-          else if (!clear && csbk_fid == 255) fprintf (stderr, " Slot %d No Encrypted Call Trunking; Slot %d Busy; Remain on VC;", pslot, oslot);
+          const char * lo_reason = "No Encrypted Call Trunking";
+          int8_t c_gi = state->gi[state->currentslot & 1];
+          if (c_gi == 1 && opts->trunk_tune_private_calls == 0)
+            lo_reason = "No Private Call Trunking";
+          else if (c_gi == 0 && opts->trunk_tune_group_calls == 0)
+            lo_reason = "No Group Call Trunking";
+          else if (opts->trunk_tune_enc_calls == 1)
+            lo_reason = "Call Locked Out";
+          if      (clear && csbk_fid == 255)  fprintf (stderr, " Slot %d %s; Slot %d Free; Return to CC; ", pslot, lo_reason, oslot);
+          else if (!clear && csbk_fid == 255) fprintf (stderr, " Slot %d %s; Slot %d Busy; Remain on VC;", pslot, lo_reason, oslot);
           else if (clear && csbk_fid == 254)  fprintf (stderr, " Cap+ Rest LSN Change: %d; Slot %d Free; Slot %d Free; Go To Rest LSN;", state->dmr_rest_channel, pslot, oslot); //disabled
           else if (!clear && csbk_fid == 254) fprintf (stderr, " Cap+ Rest LSN Change: %d; Slot %d Free; Slot %d Busy; Remain on LSN;", state->dmr_rest_channel, pslot, oslot); //disabled
           else if (clear && csbk_fid == 253)  fprintf (stderr, " Cap+ Rest LSN Change: %d; No CSBK Channel Activity; Go To Rest LSN;", state->dmr_rest_channel);
@@ -518,40 +1414,57 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
 
           if (clear)
           {
-            if (opts->p25_trunk == 1 && state->p25_cc_freq != 0 && opts->p25_is_tuned == 1)
+            long int pclear_cur_freq = trunk_get_current_freq(opts, state);
+            if (opts->p25_trunk == 1 && state->p25_cc_freq != 0 &&
+                (opts->p25_is_tuned == 1 || (pclear_cur_freq != 0 && pclear_cur_freq != state->p25_cc_freq) || csbk_fid == 253))
             {
+              did_pclear_reset = 1;
 
               //run a watchdog here so we can update this with the most recent info
+              watchdog_event_history(opts, state, 0);
               watchdog_event_current(opts, state, 0);
+              watchdog_event_history(opts, state, 1);
               watchdog_event_current(opts, state, 1);
 
               //display/le/buzzer bug fix when p_clear activated (unsure why this was disabled)
               //clear only the current slot initially, then clear both if tuning to a different freq
               if (state->currentslot == 0 && csbk_fid != 253) //don't reset on Cap+ since we aren't testing based on the current TS
               {
+                state->lastsrc = 0;
+                state->lasttg = 0;
                 state->payload_mi = 0;
                 state->payload_algid = 0;
                 state->payload_keyid = 0;
                 state->dmr_so = 0;
+                state->dmr_bcast_tg[0] = 0;
+                state->dmr_hangtime[0] = 0;
+                dmr_talker_alias_reset(state, 0);
               }
               if (state->currentslot == 1 && csbk_fid != 253)
               {
+                state->lastsrcR = 0;
+                state->lasttgR = 0;
                 state->payload_miR = 0;
                 state->payload_algidR = 0;
                 state->payload_keyidR = 0;
                 state->dmr_soR = 0;
+                state->dmr_bcast_tg[1] = 0;
+                state->dmr_hangtime[1] = 0;
+                dmr_talker_alias_reset(state, 1);
               }
+              if (state->currentslot == 0 || csbk_fid == 253) ambe_hw_reset_call(0);
+              if (state->currentslot == 1 || csbk_fid == 253) ambe_hw_reset_call(1);
 
               //rigctl
               if (opts->use_rigctl == 1)
               {
                 //Guess I forgot to add this condition here
-                if (GetCurrentFreq(opts->rigctl_sockfd) != state->p25_cc_freq)
+                long int cur_freq = trunk_get_current_freq(opts, state);
+                if (cur_freq != state->p25_cc_freq || csbk_fid == 253)
+                {
                   dmr_reset_blocks (opts, state); //reset all block gathering since we are tuning away from current frequency
 
-                //clear both if tuning away to another frequency
-                if (GetCurrentFreq(opts->rigctl_sockfd) != state->p25_cc_freq)
-                {
+                  //clear both if tuning away to another frequency
                   state->lastsrc = 0;
                   state->lasttg = 0;
                   state->payload_mi = 0;
@@ -565,18 +1478,40 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
                   state->payload_algidR = 0;
                   state->payload_keyidR = 0;
                   state->dmr_soR = 0;
+                  state->dmr_bcast_tg[0] = 0;
+                  state->dmr_bcast_tg[1] = 0;
+                  state->dmr_hangtime[0] = 0;
+                  state->dmr_hangtime[1] = 0;
+
+                  dmr_talker_alias_reset(state, 0);
+                  dmr_talker_alias_reset(state, 1);
+                  sprintf (state->call_string[0], "%s", "                     "); //21 spaces
+                  sprintf (state->call_string[1], "%s", "                     "); //21 spaces
+                  state->gi[0] = -1;
+                  state->gi[1] = -1;
+                  ambe_hw_reset_call(0);
+                  ambe_hw_reset_call(1);
                 }
 
                 //reset some strings
                 sprintf (state->call_string[state->currentslot], "%s", "                     "); //21 spaces
-                sprintf (state->active_channel[state->currentslot], "%s", "");
+                dmr_csbk_clear_active_slot (state);
+                dmr_active_channel_reset_rows (state);
+                trunk_set_t3_vc_lpcn (0);
                 state->last_vc_sync_time = 0;
                 state->last_cc_sync_time = time(NULL);
                 opts->p25_is_tuned = 0;
                 state->p25_vc_freq[0] = state->p25_vc_freq[1] = 0;
-                if (opts->setmod_bw != 0 ) SetModulation(opts->rigctl_sockfd, opts->setmod_bw);
-                if (GetCurrentFreq(opts->rigctl_sockfd) != state->p25_cc_freq)
+                if (cur_freq != state->p25_cc_freq || csbk_fid == 253)
+                {
+                  if (opts->setmod_bw != 0 ) SetModulation(opts->rigctl_sockfd, opts->setmod_bw);
                   SetFreq(opts->rigctl_sockfd, state->p25_cc_freq);
+                  state->color_code_ok = 0;
+                }
+                else
+                {
+                  trunk_update_filter_for_freq(state->p25_cc_freq);
+                }
               }
 
               //rtl
@@ -604,19 +1539,42 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
                   state->payload_algidR = 0;
                   state->payload_keyidR = 0;
                   state->dmr_soR = 0;
+                  state->dmr_bcast_tg[0] = 0;
+                  state->dmr_bcast_tg[1] = 0;
+                  state->dmr_hangtime[0] = 0;
+                  state->dmr_hangtime[1] = 0;
+
+                  dmr_talker_alias_reset(state, 0);
+                  dmr_talker_alias_reset(state, 1);
+                  sprintf (state->call_string[0], "%s", "                     "); //21 spaces
+                  sprintf (state->call_string[1], "%s", "                     "); //21 spaces
+                  state->gi[0] = -1;
+                  state->gi[1] = -1;
+                  ambe_hw_reset_call(0);
+                  ambe_hw_reset_call(1);
                 }
 
                 //reset some strings
                 sprintf (state->call_string[state->currentslot], "%s", "                     "); //21 spaces
-                sprintf (state->active_channel[state->currentslot], "%s", "");
+                dmr_csbk_clear_active_slot (state);
+                dmr_active_channel_reset_rows (state);
+                trunk_set_t3_vc_lpcn (0);
                 state->last_cc_sync_time = time(NULL);
                 state->last_vc_sync_time = 0;
                 opts->p25_is_tuned = 0;
                 state->p25_vc_freq[0] = state->p25_vc_freq[1] = 0;
                 if (opts->rtlsdr_center_freq != tempf)
+                {
                   rtl_dev_tune (opts, state->p25_cc_freq);
+                  state->color_code_ok = 0;
+                }
+                else
+                  trunk_update_filter_for_freq(state->p25_cc_freq);
                 #endif
               }
+
+              watchdog_event_history(opts, state, 0);
+              watchdog_event_history(opts, state, 1);
 
             }
           }
@@ -624,6 +1582,43 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
         #else
         UNUSED (clear); UNUSED(pslot); UNUSED(oslot);
         #endif //end if PCLEAR_TUNE_AWAY is enabled in code
+        if (csbk_fid < 253)
+        {
+          uint8_t cslot = (uint8_t)(state->currentslot & 1);
+          if (!did_pclear_reset)
+          {
+            watchdog_event_history(opts, state, cslot);
+            watchdog_event_current(opts, state, cslot);
+            if (cslot == 0)
+            {
+              state->lastsrc = 0;
+              state->lasttg = 0;
+              state->payload_mi = 0;
+              state->payload_algid = 0;
+              state->payload_keyid = 0;
+              state->dmr_so = 0;
+              dmr_talker_alias_reset(state, 0);
+            }
+            else
+            {
+              state->lastsrcR = 0;
+              state->lasttgR = 0;
+              state->payload_miR = 0;
+              state->payload_algidR = 0;
+              state->payload_keyidR = 0;
+              state->dmr_soR = 0;
+              dmr_talker_alias_reset(state, 1);
+            }
+            state->gi[cslot] = -1;
+            ambe_hw_reset_call(cslot);
+            sprintf (state->call_string[cslot], "%s", "                     "); //21 spaces
+            dmr_csbk_clear_active_slot (state);
+          }
+          state->dmr_hangtime[cslot] = 0;
+          state->dmr_bcast_tg[cslot] = 0;
+          if (!did_pclear_reset)
+            watchdog_event_history(opts, state, cslot);
+        }
       }
 
       //(P_PROTECT)
@@ -653,20 +1648,75 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
         //check the source and/or target for special gateway identifiers
         dmr_gateway_identifier (source, target);
 
-        //change this slot burst type to VLC so the revamped p_clear doesn't tune away
-        if (opts->p25_trunk == 1)
+        //preserve active TGT/SRC from TLC during Call Hangtime, or populate if tuning in mid-hangtime
+        uint8_t slot = state->currentslot;
+        uint8_t is_bcast = (p_kind == 3 && source != 0 && state->dmr_bcast_tg[slot] == source) ? 1 : 0;
+        int is_grp = (p_kind == 3) ? (state->gi[slot] == 0 || is_bcast) : (gi != 0);
+
+        if (p_kind == 2 || p_kind == 3)
+          state->dmr_hangtime[slot] = 1;
+
+        if (p_kind == 2)
         {
-          if (gi && opts->trunk_tune_group_calls == 1)
+          if (slot == 0 && (state->lasttg == 0 || state->lastsrc == 0))
           {
-            if (state->currentslot == 0) state->dmrburstL = 1;
-            else state->dmrburstR = 1;
-            state->gi[state->currentslot] = 0;
+            if (state->lasttg == 0) state->lasttg = target;
+            if (state->lastsrc == 0) state->lastsrc = source;
+            state->gi[0] = gi ? 0 : 1;
           }
-          if (!gi && opts->trunk_tune_private_calls == 1)
+          else if (slot == 1 && (state->lasttgR == 0 || state->lastsrcR == 0))
           {
-            if (state->currentslot == 0) state->dmrburstL = 1;
-            else state->dmrburstR = 1;
-            state->gi[state->currentslot] = 1;
+            if (state->lasttgR == 0) state->lasttgR = target;
+            if (state->lastsrcR == 0) state->lastsrcR = source;
+            state->gi[1] = gi ? 0 : 1;
+          }
+          if (state->call_string[slot][1] == ' ')
+            dsd_set_call_string (state, slot, gi ? "Group" : "Private",
+                                 (gi && state->dmr_bcast_tg[slot] != 0 && state->dmr_bcast_tg[slot] == target) ? "Broadcast" : "");
+        }
+        else if (p_kind == 3)
+        {
+          if (slot == 0 && (state->lasttg == 0 || state->lastsrc == 0))
+          {
+            if (state->lasttg == 0) state->lasttg = source;
+            if (state->lastsrc == 0) state->lastsrc = target;
+          }
+          else if (slot == 1 && (state->lasttgR == 0 || state->lastsrcR == 0))
+          {
+            if (state->lasttgR == 0) state->lasttgR = source;
+            if (state->lastsrcR == 0) state->lastsrcR = target;
+          }
+          if (state->call_string[slot][1] == ' ' && (state->gi[slot] == 0 || state->gi[slot] == 1 || is_bcast))
+            dsd_set_call_string (state, slot, is_grp ? "Group" : "Private", is_bcast ? "Broadcast" : "");
+        }
+
+        if (p_kind != 3 || is_grp)
+          state->gi[slot] = is_grp ? 0 : 1;
+
+        if (opts->p25_trunk == 1 && state->p25_cc_freq != 0 &&
+            trunk_is_dmr_slot_blocked(opts, state, slot))
+        {
+          long int cur_freq = trunk_get_current_freq(opts, state);
+          if ((cur_freq != 0 && cur_freq != state->p25_cc_freq) ||
+              (cur_freq == 0 && opts->p25_is_tuned == 1))
+          {
+            uint8_t dummy[12]; uint8_t dbits[96];
+            memset (dummy, 0, sizeof(dummy));
+            memset (dbits, 0, sizeof(dbits));
+            dummy[0] = 46; dummy[1] = 255;
+            dmr_cspdu (opts, state, dbits, dummy, 1, 0);
+          }
+          else if (opts->p25_is_tuned == 1)
+          {
+            int oslot = (slot ^ 1) & 1;
+            uint8_t oburst = (oslot == 0) ? state->dmrburstL : state->dmrburstR;
+            int oslot_blocked = trunk_is_dmr_slot_blocked(opts, state, oslot);
+            if (oslot_blocked || (!state->dmr_hangtime[oslot] && oburst != 16 && oburst != 0 && oburst != 1))
+            {
+              opts->p25_is_tuned = 0;
+              state->last_vc_sync_time = 0;
+              state->p25_vc_freq[0] = state->p25_vc_freq[1] = 0;
+            }
           }
         }
 
@@ -748,21 +1798,35 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
           fprintf (stderr, " LPCN CH2: %d; CC: %d;", bcast_ch2, cc_ch2);
           if (ch2_flag == 0) fprintf (stderr, " Add;");
           if (ch2_flag == 1) fprintf (stderr, " Remove;");
+
+          if (opts->p25_is_tuned == 0)
+          {
+            if (ch1_flag == 0 && bcast_ch1 != 0 && bcast_ch1 != 0xFFF && cc_ch1 == state->dmr_color_code)
+              trunk_set_t3_cc_lpcn(bcast_ch1);
+            else if (ch2_flag == 0 && bcast_ch2 != 0 && bcast_ch2 != 0xFFF && cc_ch2 == state->dmr_color_code)
+              trunk_set_t3_cc_lpcn(bcast_ch2);
+          }
         }
 
         //CallTimer_parms
         if (a_type == 1)
         {
-          //7.9.19.2 Table 7.70
+          //7.9.19.2 Table 7.70 / Annex A Table A.1
           uint16_t t_emerg_timer = (uint16_t)ConvertBitIntoBytes(&bpbits1[0], 9);
           uint8_t t_packet_timer = (uint8_t)ConvertBitIntoBytes(&bpbits1[9], 5);
 
           uint16_t t_msms_timer = (uint16_t)ConvertBitIntoBytes(&bpbits2[0], 12);
           uint16_t t_msline_timer = (uint16_t)ConvertBitIntoBytes(&bpbits2[12], 12);
 
-          //just doing the raw values here, and not the decoded values, see clause A.1, Tables A.2, A.3, A.4, A.5
+          char emerg_s[16], pkt_s[16], msms_s[16], line_s[16];
+          dmr_format_timer_val (emerg_s, sizeof(emerg_s), t_emerg_timer, 511, 30);
+          dmr_format_timer_val (pkt_s, sizeof(pkt_s), t_packet_timer, 31, 5);
+          dmr_format_timer_val (msms_s, sizeof(msms_s), t_msms_timer, 4095, 10);
+          dmr_format_timer_val (line_s, sizeof(line_s), t_msline_timer, 4095, 10);
+
           fprintf (stderr, "\n");
-          fprintf (stderr, " Timers - Emergency: %d; Packet: %d; MS-MS: %d; Line: %d; ", t_emerg_timer, t_packet_timer, t_msms_timer, t_msline_timer);
+          fprintf (stderr, " Timers - Emergency: %s; Packet: %s; MS-MS: %s; Line: %s; ",
+                   emerg_s, pkt_s, msms_s, line_s);
         }
 
         //Local_Time
@@ -780,18 +1844,13 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
           uint8_t lt_off_fr = (uint8_t)ConvertBitIntoBytes(&bpbits2[20], 2); //0 = 0; 1 = +15 mins; 2 = +30 mins; 3 = +45 mins;
           uint8_t lt_res = (uint8_t)ConvertBitIntoBytes(&bpbits2[22], 2);
 
-          int localhour = lt_hour;
-          int localmin  = lt_mins;
-          int offset = lt_off;
-          if (lt_off_sign) offset *= -1;
-
-          //I wonder if local offset will require rollover or rollunder
-          if (lt_off_sign == 1) localhour = lt_hour - lt_off;
-          if (lt_off_sign == 0) localhour = lt_hour + lt_off;
-
-          if (lt_off_fr == 1) localmin += 15;
-          if (lt_off_fr == 2) localmin += 30;
-          if (lt_off_fr == 3) localmin += 45;
+          int off_mins = (int)lt_off * 60 + (int)lt_off_fr * 15;
+          if (lt_off_sign == 1) off_mins = -off_mins;
+          int total_mins = (int)lt_hour * 60 + (int)lt_mins + off_mins;
+          while (total_mins < 0) total_mins += 1440;
+          total_mins %= 1440;
+          int localhour = total_mins / 60;
+          int localmin  = total_mins % 60;
 
           fprintf (stderr, "\n");
           if (lt_mon != 0 && lt_day != 0)
@@ -805,8 +1864,14 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
           if (lt_dofw == 6) fprintf (stderr, " Friday;");
           if (lt_dofw == 7) fprintf (stderr, " Saturday;");
           fprintf (stderr, " UTC Time: %02d:%02d:%02d;", lt_hour, lt_mins, lt_secs);
-          if (lt_off != 15) fprintf (stderr, " Local: %02d:%02d:%02d;", localhour, localmin, lt_secs);
-          if (lt_off != 15) fprintf (stderr, " Offset: %d;", offset);
+          if (lt_off != 15)
+          {
+            fprintf (stderr, " Local: %02d:%02d:%02d;", localhour, localmin, lt_secs);
+            if (lt_off_fr == 0)
+              fprintf (stderr, " Offset: %c%d;", lt_off_sign ? '-' : '+', lt_off);
+            else
+              fprintf (stderr, " Offset: %c%d:%02d;", lt_off_sign ? '-' : '+', lt_off, lt_off_fr * 15);
+          }
           if (lt_res) fprintf (stderr, " Res: %d;", lt_res);
 
         }
@@ -955,15 +2020,23 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
         //MassReg
         if (a_type == 4)
         {
+          static const char * const reg_win_str[16] = {
+            "Cancel", "0.5s", "1s", "2s",
+            "5s", "10s", "20s", "30s",
+            "100s", "300s", "1000s", "3000s",
+            "10000s", "30000s", "100000s", "200000s"
+          };
+
           uint8_t mreg_res   = (uint8_t)ConvertBitIntoBytes(&bpbits1[0], 5);
-          uint8_t reg_window = (uint8_t)ConvertBitIntoBytes(&bpbits1[5], 4); //7.2.19.5.1 Table 7.77 convert raw to seconds
+          uint8_t reg_window = (uint8_t)ConvertBitIntoBytes(&bpbits1[5], 4); //Table 6.12
           uint8_t aloha_mask = (uint8_t)ConvertBitIntoBytes(&bpbits1[9], 5);
 
           //ADDRNull or MS Individual Address
           uint32_t reg_address = bparms2; //see clause 7.2.41
 
-          fprintf (stderr, "\n"); //raw value only on the reg window, see aforementioned table
-          fprintf (stderr, " Reg Window: %X; Aloha Mask: %02X; Target: %d; ", reg_window, aloha_mask, reg_address);
+          fprintf (stderr, "\n");
+          fprintf (stderr, " Reg Window: %s (%X); Aloha Mask: %02X; Target: %d; ",
+                   reg_win_str[reg_window & 0xF], reg_window, aloha_mask, reg_address);
 
           if (mreg_res != 0)
             fprintf (stderr, "Res: %02X", mreg_res);
@@ -996,14 +2069,16 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
 
       }
 
-      if (csbk_o == 28)
+      if (csbk_o == 28 || csbk_o == 30 || csbk_o == 31)
       {
         //initial line break
         fprintf (stderr, "\n");
-        fprintf (stderr, " C_AHOY - ");
-        //C_AHOY is always a single block CSBK, no need to check or deal with continuation blocks
+        if (csbk_o == 28)      fprintf (stderr, " C_AHOY - ");
+        else if (csbk_o == 30) fprintf (stderr, " C_ACKVIT - ");
+        else                   fprintf (stderr, " C_RAND - ");
+        //C_AHOY / C_ACKVIT / C_RAND are single-block CSBKs sharing bits [16..79]
         uint16_t svc_opt = (uint16_t)ConvertBitIntoBytes(&cs_pdu_bits[16], 7);
-        uint8_t svc_flag = cs_pdu_bits[23]; //service kind flag
+        uint8_t svc_flag = cs_pdu_bits[23]; //service kind flag (AHOY/ACKVIT) or proxy flag (RAND)
         uint8_t als_flag = cs_pdu_bits[24]; //ambient listening service requested
         uint8_t ahoy_gi  = cs_pdu_bits[25]; //group or individual
         uint8_t ahoy_bf  = (uint8_t)ConvertBitIntoBytes(&cs_pdu_bits[26], 2); //UDT blocks to follow (if required)
@@ -1011,12 +2086,10 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
         uint32_t ahoy_target = (uint32_t)ConvertBitIntoBytes(&cs_pdu_bits[32], 24);
         uint32_t ahoy_source = (uint32_t)ConvertBitIntoBytes(&cs_pdu_bits[56], 24);
 
-        UNUSED(ahoy_bf);
-        UNUSED(svc_flag);
-        UNUSED(als_flag);
-
         char ahoy_str[200]; memset(ahoy_str, 0, sizeof(ahoy_str));
-        sprintf (ahoy_str, "AHOY TGT: %d; SRC: %d; ", ahoy_target, ahoy_source);
+        sprintf (ahoy_str, "%s TGT: %d; SRC: %d; ",
+                 (csbk_o == 28) ? "AHOY" : (csbk_o == 30) ? "ACKVIT" : "RAND",
+                 ahoy_target, ahoy_source);
 
         if (ahoy_gi == 0) fprintf (stderr, "Private ");
         else fprintf (stderr, "Group ");
@@ -1024,9 +2097,8 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
         if (ahoy_gi == 0)
           strcat (ahoy_str, "Private; ");
         else strcat (ahoy_str, "Group; ");
-        state->gi[state->currentslot] = ahoy_gi ^ 1;
-
-        //need to put SVC OPT decoding in here, maybe just copy and paste from FLC?
+        if (csbk_o == 28)
+          state->gi[state->currentslot] = ahoy_gi ^ 1;
 
         fprintf (stderr, "FID: %02X SVC: %02X ", csbk_fid, svc_opt);
         if (svc_kind == 0 || svc_kind == 1) fprintf (stderr, "Voice Call ");
@@ -1043,6 +2115,13 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
         else if (svc_kind == 14) fprintf (stderr, "Registration/Authentication ");
         else if (svc_kind == 15) fprintf (stderr, "Cancel Call Service ");
 
+        if (csbk_o != 31 && als_flag && ahoy_gi == 0 && (svc_kind == 0 || svc_kind == 1))
+          fprintf (stderr, "Ambient Listening ");
+        if (ahoy_bf > 0 && (svc_kind == 4 || svc_kind == 5 || svc_kind == 6))
+          fprintf (stderr, "(%d UDT Blocks) ", ahoy_bf);
+        if (csbk_o == 31 && svc_flag)
+          fprintf (stderr, "Proxy ");
+
         fprintf (stderr, "Target: %d; Source: %d; ", ahoy_target, ahoy_source);
 
         if (svc_kind == 0 || svc_kind == 1) strcat (ahoy_str, "Voice Call; ");
@@ -1058,6 +2137,19 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
         else if (svc_kind == 13) strcat (ahoy_str, "Supplimentary Service (Stun/Revive/Kill/Auth); ");
         else if (svc_kind == 14) strcat (ahoy_str, "Registration/Authentication; ");
         else if (svc_kind == 15) strcat (ahoy_str, "Cancel Call Service; ");
+        if (csbk_o != 31 && als_flag && ahoy_gi == 0 && (svc_kind == 0 || svc_kind == 1))
+          strcat (ahoy_str, "Ambient Listening; ");
+
+        if (svc_kind == 7)
+        {
+          char st_buf[32];
+          fprintf (stderr, "Status: %d (%02X); ", svc_opt, svc_opt);
+          snprintf (st_buf, sizeof(st_buf), "Status: %d (%02X); ", svc_opt, svc_opt);
+          if (strlen(ahoy_str) + strlen(st_buf) < sizeof(ahoy_str))
+            strcat (ahoy_str, st_buf);
+        }
+        else if ((svc_kind <= 6 || svc_kind == 10 || svc_kind == 11) && svc_opt != 0)
+          dmr_print_svc_opt_flags ((uint8_t)svc_opt, ahoy_str, sizeof(ahoy_str));
 
         //check the source and/or target for special gateway identifiers
         dmr_gateway_identifier (ahoy_source, ahoy_target);
@@ -1115,13 +2207,6 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
         dmr_gateway_identifier (pm_source, pm_target);
       }
 
-      if (csbk_o == 30)
-      {
-        //initial line break
-        fprintf (stderr, "\n");
-        fprintf (stderr, " C_ACKVIT (Ackvitation/Authorization) ");
-      }
-
       if (csbk_fid != 0x10) //if Not Motorola
       {
         //These opcodes to exist on CapMax as well, but don't function the same
@@ -1141,12 +2226,16 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
           uint32_t ack_target = (uint32_t)ConvertBitIntoBytes(&cs_pdu_bits[32], 24);
           uint32_t ack_source = (uint32_t)ConvertBitIntoBytes(&cs_pdu_bits[56], 24);
 
-          //response_info and reason_code start to get really convoluted on decoding them
-          //for each opcode, so I am just going to put the values out to the console,
-          //look at ETSI TS 102 361-4 V1.12.1 7.2.7 for more info
+          static const char * const ack_class_str[4] = {"NACK", "ACK", "QACK", "WACK"};
+          uint8_t ack_type = (reason_code >> 6) & 0x03;
+          const char * reason_str = dmr_t3_ack_reason_str (reason_code);
 
-          fprintf (stderr, "Response: %02X; Reason: %02X; ", response_info, reason_code);
-          if (ack_res1) fprintf (stderr, " Res: %d", ack_res1);
+          fprintf (stderr, "[%s] Response: %02X; Reason: %02X",
+                   ack_class_str[ack_type], response_info, reason_code);
+          if (reason_str != NULL)
+            fprintf (stderr, " (%s)", reason_str);
+          fprintf (stderr, "; ");
+          if (ack_res1) fprintf (stderr, " Res: %d ", ack_res1);
           fprintf (stderr, "Target: %d; Source: %d; ", ack_target, ack_source);
 
           //check the source and/or target for special gateway identifiers
@@ -1155,11 +2244,320 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
         }
       }
 
-      if (csbk_o == 31)
+      if (csbk_fid == 0x10 && csbk_o == 34)
       {
-        //initial line break
+        uint16_t cm_lpcn[2];
+        uint16_t cm_tg[2][2];
+        for (int e = 0; e < 2; e++)
+        {
+          int base = 16 + (e * 32);
+          cm_lpcn[e]  = (uint16_t)ConvertBitIntoBytes(&cs_pdu_bits[base], 12);
+          cm_tg[e][0] = (uint16_t)ConvertBitIntoBytes(&cs_pdu_bits[base + 12], 10);
+          cm_tg[e][1] = (uint16_t)ConvertBitIntoBytes(&cs_pdu_bits[base + 22], 10);
+        }
+
+        s_capmax_cc_seen = 1;
+        s_capmax_status_slot = (int)(state->currentslot & 1);
+        s_capmax_slot_aloha_cnt = 0;
+        s_capmax_non_status_csbks = 0;
+
+        sprintf (state->dmr_branding, "%s", "Motorola");
+
+        if (opts->use_rigctl == 1 && opts->p25_is_tuned == 0)
+        {
+          ccfreq = trunk_get_current_freq (opts, state);
+          trunk_set_cc_freq_if_valid (opts, state, ccfreq);
+        }
+        if (opts->audio_in_type == 3 && opts->p25_is_tuned == 0)
+        {
+          ccfreq = (long int)opts->rtlsdr_center_freq;
+          trunk_set_cc_freq_if_valid (opts, state, ccfreq);
+        }
+
         fprintf (stderr, "\n");
-        fprintf (stderr, " C_RAND ");
+        fprintf (stderr, " Capacity Max Channel Status -");
+        if (cm_lpcn[0] == 0 && cm_lpcn[1] == 0)
+        {
+          fprintf (stderr, " Idle;");
+        }
+        else
+        {
+          for (int e = 0; e < 2; e++)
+          {
+            if (cm_lpcn[e] == 0)
+              continue;
+            fprintf (stderr, " LPCN: %04u", cm_lpcn[e]);
+            for (int s = 0; s < 2; s++)
+            {
+              if (cm_tg[e][s] != 0)
+                fprintf (stderr, " TS%d: %u", s + 1, cm_tg[e][s]);
+              else
+                fprintf (stderr, " TS%d: Idle", s + 1);
+            }
+            fprintf (stderr, ";");
+          }
+        }
+
+        for (int e = 0; e < 2; e++)
+        {
+          if (cm_lpcn[e] == 0)
+            continue;
+          for (int s = 0; s < 2; s++)
+          {
+            if (cm_tg[e][s] != 0)
+            {
+              int recently_cleared = ((now - s_last_pclear_time) <= 2 &&
+                                      cm_lpcn[e] == s_last_pclear_lpcn &&
+                                      (s_last_pclear_slot == (uint8_t)s || s_last_pclear_slot == 2));
+              if (!recently_cleared)
+                dmr_t3_active_set (state, cm_lpcn[e], (uint8_t)s, "Group", cm_tg[e][s], 0, now, 0);
+            }
+            else
+            {
+              dmr_t3_active_clear_slot_lpcn (state, cm_lpcn[e], (uint8_t)s, now);
+            }
+          }
+        }
+
+        int cur_full = (cm_lpcn[0] != 0 && cm_lpcn[1] != 0);
+        for (int i = 0; i < DMR_T3_ACTIVE_MAX; i++)
+        {
+          if (state->dmr_t3_active_chan[i] == 0)
+            continue;
+          uint16_t ch = state->dmr_t3_active_chan[i];
+          if (ch != cm_lpcn[0] && ch != cm_lpcn[1])
+          {
+            if (!s_t3_active_cm_seen[i] && (now - s_t3_active_grant_time[i]) <= 1)
+              continue;
+            if (!cur_full)
+            {
+              dmr_t3_active_clear_entry (state, i);
+            }
+            else
+            {
+              s_t3_active_cm_miss[i]++;
+              if (s_t3_active_cm_miss[i] >= 3 || (now - state->dmr_t3_active_time[i]) > 1)
+                dmr_t3_active_clear_entry (state, i);
+            }
+          }
+        }
+
+        if (cm_lpcn[0] != 0 || cm_lpcn[1] != 0)
+          state->last_active_time = now;
+
+        int cm_did_tune = 0;
+        if (opts->trunk_tune_group_calls == 1 && (cm_lpcn[0] != 0 || cm_lpcn[1] != 0))
+        {
+          if (state->tg_hold != 0)
+          {
+            for (int e = 0; e < 2; e++)
+            {
+              if (cm_lpcn[e] == 0)
+                continue;
+              for (int s = 0; s < 2; s++)
+              {
+                if (cm_tg[e][s] != 0 && state->tg_hold == cm_tg[e][s])
+                {
+                  long int hfreq = state->trunk_chan_map[cm_lpcn[e]];
+                  long int cur_f = trunk_get_current_freq(opts, state);
+                  if (hfreq != 0 && cur_f != hfreq)
+                    state->last_vc_sync_time = 0;
+                }
+              }
+            }
+          }
+
+          if ((now - state->last_vc_sync_time) > 2)
+          {
+            opts->p25_is_tuned = 0;
+            state->p25_vc_freq[0] = 0;
+            state->p25_vc_freq[1] = 0;
+
+            uint16_t tune_lpcn = 0;
+            uint8_t  tune_slot = 0;
+            uint16_t tune_tg   = 0;
+            long int tune_freq = 0;
+
+            for (int pass = 0; pass < 2 && tune_freq == 0; pass++)
+            {
+              if (pass == 0 && state->tg_hold == 0)
+                continue;
+              for (int e = 0; e < 2 && tune_freq == 0; e++)
+              {
+                if (cm_lpcn[e] == 0)
+                  continue;
+                long int f = state->trunk_chan_map[cm_lpcn[e]];
+                if (f == 0)
+                  continue;
+                for (int s = 0; s < 2 && tune_freq == 0; s++)
+                {
+                  uint16_t tg = cm_tg[e][s];
+                  if (tg == 0)
+                    continue;
+                  if (pass == 0 && tg != state->tg_hold)
+                    continue;
+                  if ((now - s_last_pclear_time) <= 2 &&
+                      cm_lpcn[e] == s_last_pclear_lpcn &&
+                      (s_last_pclear_slot == (uint8_t)s || s_last_pclear_slot == 2))
+                    continue;
+                  if ((now - s_last_cm_tune_time) <= 5 &&
+                      cm_lpcn[e] == s_last_cm_tune_lpcn &&
+                      s_last_cm_tune_slot == (uint8_t)s &&
+                      s_last_cm_tune_tg == tg)
+                    continue;
+
+                  char mode[8];
+                  sprintf (mode, "%s", (opts->trunk_use_allow_list == 1) ? "B" : "");
+                  for (int i = 0; i < state->group_tally; i++)
+                  {
+                    if (state->group_array[i].groupNumber == tg)
+                    {
+                      fprintf (stderr, " [%s]", state->group_array[i].groupName);
+                      strcpy (mode, state->group_array[i].groupMode);
+                      break;
+                    }
+                  }
+                  if (state->tg_hold != 0 && state->tg_hold != tg) sprintf (mode, "%s", "B");
+                  if (state->tg_hold != 0 && state->tg_hold == tg) sprintf (mode, "%s", "A");
+
+                  if (strcmp(mode, "B") != 0 && strcmp(mode, "DE") != 0)
+                  {
+                    tune_lpcn = cm_lpcn[e];
+                    tune_slot = (uint8_t)s;
+                    tune_tg   = tg;
+                    tune_freq = f;
+                  }
+                }
+              }
+            }
+
+            if (tune_freq != 0)
+            {
+              uint32_t known_src = dmr_t3_active_get_src (state, tune_lpcn, tune_slot, tune_tg, now);
+              long int cur_f = trunk_get_current_freq(opts, state);
+              if (cur_f == 0 && opts->p25_is_tuned == 0)
+                cur_f = state->p25_cc_freq;
+              int same_cc_chan = (opts->p25_is_tuned == 0 && tune_lpcn != 0 &&
+                                  tune_lpcn == (uint16_t)trunk_get_t3_cc_lpcn(state));
+              int slot_busy = (tune_slot == 0)
+                                ? (state->dmrburstL == 16 || state->dmrburstL == 0 || state->dmrburstL == 1 ||
+                                   state->dmrburstL == 2 || state->dmr_hangtime[0] ||
+                                   state->lasttg != 0 || state->lastsrc != 0)
+                                : (state->dmrburstR == 16 || state->dmrburstR == 0 || state->dmrburstR == 1 ||
+                                   state->dmrburstR == 2 || state->dmr_hangtime[1] ||
+                                   state->lasttgR != 0 || state->lastsrcR != 0);
+              if (!slot_busy && ((cur_f != 0 && tune_freq == cur_f) || same_cc_chan))
+              {
+                dmr_t3_grant_init_slot (state, tune_slot, 0, 49, 0, 0, 0, tune_tg, known_src);
+                dmr_t3_active_mark_logged (state, tune_lpcn, tune_slot, tune_tg);
+              }
+
+              if (opts->p25_trunk == 0)
+              {
+                state->p25_vc_freq[0] = tune_freq;
+                state->p25_vc_freq[1] = tune_freq;
+                trunk_set_t3_vc_lpcn(tune_lpcn);
+              }
+              else if (state->p25_cc_freq != 0)
+              {
+                if (opts->use_rigctl == 1)
+                {
+                  long int cur_freq = trunk_get_current_freq(opts, state);
+                  if (cur_freq != tune_freq)
+                  {
+                    dmr_reset_blocks (opts, state);
+                    dmr_csbk_clear_both_slots (state);
+                    if (opts->setmod_bw != 0) SetModulation(opts->rigctl_sockfd, opts->setmod_bw);
+                    SetFreq(opts->rigctl_sockfd, tune_freq);
+                  }
+                  else
+                  {
+                    trunk_update_filter_for_freq(tune_freq);
+                  }
+                  dmr_t3_grant_init_slot (state, tune_slot, 0, 49, 0, 0, 0, tune_tg, known_src);
+                  dmr_t3_active_mark_logged (state, tune_lpcn, tune_slot, tune_tg);
+                  state->p25_vc_freq[0] = state->p25_vc_freq[1] = tune_freq;
+                  trunk_set_t3_vc_lpcn(tune_lpcn);
+                  opts->p25_is_tuned = 1;
+                  state->last_vc_sync_time = now;
+                  state->last_t3_tune_time = now;
+                  s_last_cm_tune_lpcn = tune_lpcn;
+                  s_last_cm_tune_slot = tune_slot;
+                  s_last_cm_tune_tg   = tune_tg;
+                  s_last_cm_tune_time = now;
+                  cm_did_tune = 1;
+                }
+                else if (opts->audio_in_type == 3)
+                {
+                  #ifdef USE_RTLSDR
+                  uint32_t tempf = (uint32_t)tune_freq;
+                  if (opts->rtlsdr_center_freq != tempf)
+                  {
+                    dmr_reset_blocks (opts, state);
+                    dmr_csbk_clear_both_slots (state);
+                    rtl_dev_tune (opts, tune_freq);
+                  }
+                  else
+                  {
+                    trunk_update_filter_for_freq(tune_freq);
+                  }
+                  dmr_t3_grant_init_slot (state, tune_slot, 0, 49, 0, 0, 0, tune_tg, known_src);
+                  dmr_t3_active_mark_logged (state, tune_lpcn, tune_slot, tune_tg);
+                  state->p25_vc_freq[0] = state->p25_vc_freq[1] = tune_freq;
+                  trunk_set_t3_vc_lpcn(tune_lpcn);
+                  opts->p25_is_tuned = 1;
+                  state->last_vc_sync_time = now;
+                  state->last_t3_tune_time = now;
+                  s_last_cm_tune_lpcn = tune_lpcn;
+                  s_last_cm_tune_slot = tune_slot;
+                  s_last_cm_tune_tg   = tune_tg;
+                  s_last_cm_tune_time = now;
+                  cm_did_tune = 1;
+                  #endif
+                }
+              }
+            }
+          }
+        }
+
+        if (cm_did_tune)
+        {
+          dmr_active_channel_reset_rows (state);
+        }
+        else
+        {
+          long int cur_f = trunk_get_current_freq(opts, state);
+          if (cur_f == 0 && opts->p25_is_tuned == 0)
+            cur_f = state->p25_cc_freq;
+          uint16_t cc_lpcn = (uint16_t)trunk_get_t3_cc_lpcn(state);
+          for (int e = 0; e < 2; e++)
+          {
+            if (cm_lpcn[e] == 0)
+              continue;
+            long int f = state->trunk_chan_map[cm_lpcn[e]];
+            int on_cm_freq = ((cur_f != 0 && f != 0 && f == cur_f) ||
+                              (opts->p25_is_tuned == 0 && cc_lpcn != 0 && cm_lpcn[e] == cc_lpcn));
+            for (int s = 0; s < 2; s++)
+            {
+              if (cm_tg[e][s] == 0)
+                continue;
+              int recently_cleared = ((now - s_last_pclear_time) <= 2 &&
+                                      cm_lpcn[e] == s_last_pclear_lpcn &&
+                                      (s_last_pclear_slot == (uint8_t)s || s_last_pclear_slot == 2));
+              if (recently_cleared)
+                continue;
+              if (on_cm_freq)
+              {
+                dmr_t3_active_mark_logged (state, cm_lpcn[e], (uint8_t)s, cm_tg[e][s]);
+              }
+              else if (!dmr_t3_active_is_logged (state, cm_lpcn[e], (uint8_t)s, cm_tg[e][s]))
+              {
+                if (dmr_log_t3_grant_event (opts, state, (uint8_t)s, cm_lpcn[e], 49, 0, 0, cm_tg[e][s], now))
+                  dmr_t3_active_mark_logged (state, cm_lpcn[e], (uint8_t)s, cm_tg[e][s]);
+              }
+            }
+          }
+        }
       }
 
       //tier 2 csbks
@@ -1168,9 +2566,15 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
         fprintf (stderr, "\n");
         fprintf (stderr, " Unit to Unit Voice Service Request (UU_V_Req) - ");
 
+        uint8_t uu_so = (uint8_t)ConvertBitIntoBytes(&cs_pdu_bits[16], 7);
         uint32_t target = (uint32_t)ConvertBitIntoBytes(&cs_pdu_bits[32], 24);
         uint32_t source = (uint32_t)ConvertBitIntoBytes(&cs_pdu_bits[56], 24);
         fprintf (stderr, "Target [%d] - Source [%d] ", target, source);
+        if (uu_so != 0)
+        {
+          fprintf (stderr, "SVC: %02X; ", uu_so);
+          dmr_print_svc_opt_flags (uu_so, NULL, 0);
+        }
       }
 
       if (csbk_o == 5)
@@ -1178,9 +2582,20 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
         fprintf (stderr, "\n");
         fprintf (stderr, " Unit to Unit Voice Service Answer Response (UU_Ans_Req) - ");
 
+        uint8_t uu_so = (uint8_t)ConvertBitIntoBytes(&cs_pdu_bits[16], 7);
+        uint8_t ans_rsp = (uint8_t)ConvertBitIntoBytes(&cs_pdu_bits[24], 8);
         uint32_t target = (uint32_t)ConvertBitIntoBytes(&cs_pdu_bits[32], 24);
         uint32_t source = (uint32_t)ConvertBitIntoBytes(&cs_pdu_bits[56], 24);
-        fprintf (stderr, "Target [%d] - Source [%d] ", target, source);
+        const char * ans_str = (ans_rsp == 0x20) ? "Proceed" :
+                               (ans_rsp == 0x21) ? "Deny" :
+                               (ans_rsp == 0x22) ? "Wait" : "Unknown";
+        fprintf (stderr, "Target [%d] - Source [%d] - Answer: %s (%02X); ",
+                 target, source, ans_str, ans_rsp);
+        if (uu_so != 0)
+        {
+          fprintf (stderr, "SVC: %02X; ", uu_so);
+          dmr_print_svc_opt_flags (uu_so, NULL, 0);
+        }
 
       }
 
@@ -1195,9 +2610,13 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
         fprintf (stderr, "\n");
         fprintf (stderr, " Negative Acknowledgement Response (NACK_Rsp) - ");
 
+        uint8_t src_type = cs_pdu_bits[17];
+        uint8_t svc_type = (uint8_t)ConvertBitIntoBytes(&cs_pdu_bits[18], 6);
+        uint8_t nack_reason = (uint8_t)ConvertBitIntoBytes(&cs_pdu_bits[24], 8);
         uint32_t target = (uint32_t)ConvertBitIntoBytes(&cs_pdu_bits[32], 24);
         uint32_t source = (uint32_t)ConvertBitIntoBytes(&cs_pdu_bits[56], 24);
-        fprintf (stderr, "Target [%d] - Source [%d] ", target, source);
+        fprintf (stderr, "Target [%d] - Source [%d] - SrcType: %s; SvcType: %02X; Reason: %02X; ",
+                 target, source, src_type ? "MS" : "BS", svc_type, nack_reason);
 
       }
 
@@ -1221,7 +2640,7 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
         uint8_t blocks = (uint8_t)ConvertBitIntoBytes(&cs_pdu_bits[24], 8);
         uint32_t target = (uint32_t)ConvertBitIntoBytes(&cs_pdu_bits[32], 24);
         uint32_t source = (uint32_t)ConvertBitIntoBytes(&cs_pdu_bits[56], 24);
-        UNUSED2(res, blocks);
+        UNUSED(res);
 
         uint8_t target_hash[24];
         uint8_t tg_hash = 0;
@@ -1257,9 +2676,17 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
           if (gi == 0) target = (uint32_t)ConvertBitIntoBytes(&cs_pdu_bits[40], 16);
           source = (uint32_t)ConvertBitIntoBytes(&cs_pdu_bits[64], 16);
           int rest = (uint32_t)ConvertBitIntoBytes(&cs_pdu_bits[60], 4);
-          fprintf (stderr, "Source: %d - Target: %d - Rest LSN: %d", source, target, rest);
+          fprintf (stderr, "Source: %d - Target: %d - Rest LSN: %d ", source, target, rest);
+          if (rest > 0)
+          {
+            state->dmr_rest_channel = rest;
+            if (state->trunk_chan_map[rest] != 0)
+              state->p25_cc_freq = state->trunk_chan_map[rest];
+          }
         }
         else fprintf (stderr, "Source: %d - Target: %d ", source, target);
+
+        fprintf (stderr, "Blocks: %d ", blocks);
 
         //if trunking and data calls allowed, convert preamble burst to a DATA header burst to hold p_clear or con+
         if (opts->p25_trunk == 1 && opts->trunk_tune_data_calls == 1)
@@ -1285,7 +2712,20 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
         fprintf (stderr, "\n");
         fprintf (stderr, "%s", KYEL);
 
-        fprintf (stderr, " Capacity Plus CSBK 0x3A ");
+        uint8_t fl = (uint8_t)ConvertBitIntoBytes(&cs_pdu_bits[16], 2);
+        uint8_t ts = cs_pdu_bits[18];
+        uint8_t res = cs_pdu_bits[19];
+        uint8_t rest_channel = (uint8_t)ConvertBitIntoBytes(&cs_pdu_bits[20], 4);
+        fprintf (stderr, " Capacity Plus CSBK 0x3A - FL: %d TS: %d RS: %d - Rest LSN: %d ", fl, ts, res, rest_channel);
+        if (rest_channel > 0)
+        {
+          state->dmr_rest_channel = rest_channel;
+          state->dmr_mfid = 0x10;
+          sprintf (state->dmr_branding, "%s", "Motorola");
+          sprintf (state->dmr_branding_sub, "%s", "Cap+ ");
+          if (state->trunk_chan_map[rest_channel] != 0)
+            state->p25_cc_freq = state->trunk_chan_map[rest_channel];
+        }
 
         // 01:15:08 Sync: +DMR   slot1  [slot2] | Color Code=03 | CSBK
         // Capacity Plus Channel Status - FL: 3 TS: 1 RS: 0 - Rest Channel 1 - Single Block
@@ -1317,12 +2757,19 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
         memset (nl, 0, sizeof (nl));
         memset (nr, 0, sizeof (nr));
 
+        state->dmr_t3_syscode = 0;
+        state->dmr_neighbor_count = 0;
         for (int i = 0; i < 6; i++)
         {
           nl[i] = (uint8_t)ConvertBitIntoBytes(&cs_pdu_bits[32+(i*8)], 4);
           nr[i] = (uint8_t)ConvertBitIntoBytes(&cs_pdu_bits[36+(i*8)], 4);
-          if (nl[i]) fprintf (stderr, "Site: %d Rest: %d; ", nl[i], nr[i]);
+          if (nl[i])
+          {
+            fprintf (stderr, "Site: %d Rest: %d; ", nl[i], nr[i]);
+            dmr_add_neighbor (state, nl[i]);
+          }
         }
+        state->last_active_time = time(NULL);
 
       }
 
@@ -1341,23 +2788,25 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
         uint8_t group_tally = 0; //set this to the number of active channels tallied
         uint8_t bank_one = 0;
         uint8_t bank_two = 0;
-        uint8_t b2_start = 0;
+        uint8_t pbank_one = 0;
+        uint8_t pbank_two = 0;
         uint8_t block_num = state->cap_plus_block_num[ts];
         uint8_t pdflag = 0;
-        uint8_t pdflag2 = 0;
-        uint16_t private_target = 0;
-        uint8_t pd_b2 = 0;
         uint8_t start = 8;
         uint8_t end = 8;
         uint8_t fl_bytes = 0;
         uint8_t ch[24]; //one bit per channel
         uint8_t pch[24]; //private or data call channel bits
         uint16_t tg = 0;
-        int i, j, k, x;
+        int i, j;
         //tg and channel info for trunking purposes
+        uint16_t g_tg[16];
+        uint16_t p_tg[16];
         uint16_t t_tg[24];
-        char cap_active[20]; //local string to concantenate to active channel stuff
-        uint8_t empty[24]; //used to evaluate whether or not all channels are idle or not with memcmp after loading
+        uint16_t empty[24]; //used to evaluate whether or not all channels are idle or not with memcmp after loading
+        int cap_complete = 0;
+        int hdr_ok = 1;
+        const int cap_max_bits = (int)sizeof(state->cap_plus_csbk_bits[ts]);
 
         //sanity check
         if (block_num > 6)
@@ -1367,6 +2816,8 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
         }
 
         //init some arrays
+        memset (g_tg, 0, sizeof(g_tg));
+        memset (p_tg, 0, sizeof(p_tg));
         memset (t_tg, 0, sizeof(t_tg));
         memset (ch, 0, sizeof(ch));
         memset (pch, 0, sizeof(pch));
@@ -1379,26 +2830,49 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
           memset (state->cap_plus_csbk_bits[ts], 0, sizeof(state->cap_plus_csbk_bits[ts]));
           for (i = 0; i < 10*8; i++) state->cap_plus_csbk_bits[ts][i] = cs_pdu_bits[i];
           state->cap_plus_block_num[ts] = 0;
+          block_num = 0;
+          s_cap_mbc_valid[ts] = (fl == 2) ? 1 : 0;
+          cap_complete = (fl == 3) ? 1 : 0;
         }
         else //appended block (fl 0) or final block (fl 1)
         {
-          for (i = 0; i < 7*8; i++) state->cap_plus_csbk_bits[ts][i+80+(7*8*block_num)] = cs_pdu_bits[i+24];
-          block_num++;
-          state->cap_plus_block_num[ts]++;
+          hdr_ok = (s_cap_mbc_valid[ts] == 1 &&
+                    (uint16_t)ConvertBitIntoBytes(&state->cap_plus_csbk_bits[ts][0], 16) == 0xBE10);
+          if (hdr_ok && (80 + (7*8*block_num) + 56) <= cap_max_bits)
+          {
+            for (i = 0; i < 7*8; i++) state->cap_plus_csbk_bits[ts][i+80+(7*8*block_num)] = cs_pdu_bits[i+24];
+            block_num++;
+            state->cap_plus_block_num[ts]++;
+            if (fl == 1)
+            {
+              s_cap_mbc_valid[ts] = 0;
+              cap_complete = 1;
+            }
+          }
+          else
+          {
+            if (fl == 1)
+            {
+              s_cap_mbc_valid[ts] = 0;
+              memset (state->cap_plus_csbk_bits[ts], 0, sizeof(state->cap_plus_csbk_bits[ts]));
+              state->cap_plus_block_num[ts] = 0;
+            }
+            cap_complete = 0;
+          }
         }
 
         //move assignment until later when evaluating for a p_clear condition
-        if (rest_channel != state->dmr_rest_channel)
+        static long int s_cap_cur_freq[2] = {0, 0};
+        if (fl == 2 || fl == 3)
+          s_cap_cur_freq[ts & 1] = trunk_get_current_freq(opts, state);
+        if (rest_channel > 0)
         {
-          state->dmr_rest_channel = rest_channel;
-        }
+          if (rest_channel != state->dmr_rest_channel)
+            state->dmr_rest_channel = rest_channel;
 
-        //assign to cc freq to follow during no sync
-        if (state->trunk_chan_map[rest_channel] != 0)
-        {
-          // state->p25_cc_freq = state->trunk_chan_map[rest_channel];
-          //set to always tuned
-          opts->p25_is_tuned = 1;
+          //assign to cc freq to follow during no sync
+          if (state->trunk_chan_map[rest_channel] != 0)
+            state->p25_cc_freq = state->trunk_chan_map[rest_channel];
         }
 
         fprintf (stderr, " Capacity Plus Channel Status - FL: %d TS: %d RS: %d - Rest LSN: %d", fl, ts, res, rest_channel);
@@ -1406,98 +2880,109 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
         if (fl == 1) fprintf (stderr, " - Final Block");
         if (fl == 2) fprintf (stderr, " - Initial Block");
         if (fl == 3) fprintf (stderr, " - Single Block");
+        if ((fl == 0 || fl == 1) && !hdr_ok) fprintf (stderr, " (Orphaned)");
 
-        //look at each group channel bit -- run this PRIOR to checking private or data calls
-        //or else we will overwrite the ch bits we set below for private calls with zeroes
-        //these also seem to indicate data calls -- can't find a distinction of which is which
-        bank_one = (uint8_t)ConvertBitIntoBytes(&state->cap_plus_csbk_bits[ts][24], 8);
-        for (int i = 0; i < 8; i++)
+        if (cap_complete)
         {
-          ch[i] = state->cap_plus_csbk_bits[ts][i+24];
-          if (ch[i] == 1) group_tally++; //figure out where to start looking in the byte stream for the 0next bank of calls
-        }
+          int bit_pos = 24;
 
-        //Expanded to cover larger systems up to 16 slots.
-        bank_two = (uint8_t)ConvertBitIntoBytes(&state->cap_plus_csbk_bits[ts][32+(group_tally*8)], 8); //32
-        b2_start = group_tally;
-        if (bank_two)
-        {
-          for (int i = 0; i < 8; i++)
+          //look at each group channel bit -- run this PRIOR to checking private or data calls
+          //or else we will overwrite the ch bits we set below for private calls with zeroes
+          //these also seem to indicate data calls -- can't find a distinction of which is which
+          bank_one = (uint8_t)ConvertBitIntoBytes(&state->cap_plus_csbk_bits[ts][bit_pos], 8);
+          bit_pos += 8;
+          for (i = 0; i < 8; i++)
           {
-            ch[i+8] = state->cap_plus_csbk_bits[ts][i+32+(b2_start*8)];
-            if (ch[i+8] == 1) group_tally++;
-          }
-        }
-
-        //check flag for appended private and/or data calls
-        pdflag = (uint8_t)ConvertBitIntoBytes(&state->cap_plus_csbk_bits[ts][40+(group_tally*8)], 8);
-
-        //check for private activity on LSNs 1-8
-        if (fl == 1 || fl == 3)
-        {
-          if (pdflag) //== 0x80 //testing denny's 0x80 or 0x90 flag discovery
-          {
-            k = 0; //= 0
-            fprintf (stderr, "\n");
-            fprintf (stderr, " Bank One F%X Private or Data Call(s) - ", pdflag);
-            for (int i = 0; i < 8; i++)
+            ch[i] = state->cap_plus_csbk_bits[ts][24+i];
+            if (ch[i] == 1)
             {
-              pch[i] = state->cap_plus_csbk_bits[ts][i+48+(group_tally*8)];
-              if (pch[i] == 1)
-              {
-                fprintf (stderr, " LSN %02d:", i+1);
-                private_target = (uint16_t)ConvertBitIntoBytes(&state->cap_plus_csbk_bits[ts][56+(k*16)+(group_tally*8)], 16);
-                fprintf (stderr, " TGT %d;", private_target);
-                k++;
-                if (bank_one == 0) bank_one = 0xFF; //set all bits on so we can atleast parse all of them below in listing/display
-              }
+              if (bit_pos + 8 <= cap_max_bits)
+                g_tg[i] = (uint16_t)ConvertBitIntoBytes(&state->cap_plus_csbk_bits[ts][bit_pos], 8);
+              bit_pos += 8;
+              group_tally++;
             }
-            //save for starting point of the next private call bank
-            pd_b2 = k;
           }
-        }
-        //end private/data call check on LSNs 1-8
 
-        //check flag for appended private and/or data calls -- flag two still needs work or testing, double checking, etc, disable if issues arise
-        pdflag2 = (uint8_t)ConvertBitIntoBytes(&state->cap_plus_csbk_bits[ts][56+(group_tally*8)+(pd_b2*16)], 8);  //48 -- had wrong value here (atleast in the one sample with the false positive)
-
-        //check for private activity on LSNs 9-16
-        if (fl == 1 || fl == 3)
-        {
-          //then check to see if this byte has a value, should be 0x80, could be other?
-          //this bytes location shifts depending on level of activity -- see banks above
-          if (pdflag2) //== 0x80 //testing denny's 0x80 or 0x90 flag discovery
+          //Expanded to cover larger systems up to 16 slots.
+          int b2_map_pos = bit_pos;
+          bank_two = (b2_map_pos + 8 <= cap_max_bits)
+                   ? (uint8_t)ConvertBitIntoBytes(&state->cap_plus_csbk_bits[ts][b2_map_pos], 8)
+                   : 0;
+          bit_pos += 8;
+          if (bank_two)
           {
-            k = 0;
-            fprintf (stderr, "\n");
-            fprintf (stderr, " Bank Two F%02X Private or Data Call(s) - ", pdflag2);
-            for (int i = 0; i < 8; i++)
+            for (i = 0; i < 8; i++)
             {
-              pch[i+8] = state->cap_plus_csbk_bits[ts][i+64+(group_tally*8)+(pd_b2*16)]; //56
-              if (pch[i+8] == 1)
+              ch[i+8] = state->cap_plus_csbk_bits[ts][b2_map_pos+i];
+              if (ch[i+8] == 1)
               {
-                fprintf (stderr, " LSN %02d:", i+1);
-                private_target = (uint16_t)ConvertBitIntoBytes(&state->cap_plus_csbk_bits[ts][64+(k*16)+(group_tally*8)+(pd_b2*16)], 16); //56 -- had wrong value here (atleast in the one sample with the false positive)
-                fprintf (stderr, " TGT %d;", private_target);
-                k++;
-                if (bank_two == 0) bank_two = 0xFF; //set all bits on so we can atleast parse all of them below in listing/display
+                if (bit_pos + 8 <= cap_max_bits)
+                  g_tg[i+8] = (uint16_t)ConvertBitIntoBytes(&state->cap_plus_csbk_bits[ts][bit_pos], 8);
+                bit_pos += 8;
+                group_tally++;
               }
             }
           }
-        }
-        //end private/data call check on LSNs 9-16
 
-        if (fl == 1 || fl == 3)
-        {
+          //check flag for appended private and/or data calls
+          pdflag = (bit_pos + 8 <= cap_max_bits)
+                 ? (uint8_t)ConvertBitIntoBytes(&state->cap_plus_csbk_bits[ts][bit_pos], 8)
+                 : 0;
+          bit_pos += 8;
+
+          if (pdflag != 0)
+          {
+            //check for private activity on LSNs 1-8
+            int p1_map_pos = bit_pos;
+            pbank_one = (p1_map_pos + 8 <= cap_max_bits)
+                      ? (uint8_t)ConvertBitIntoBytes(&state->cap_plus_csbk_bits[ts][p1_map_pos], 8)
+                      : 0;
+            bit_pos += 8;
+            if (pbank_one)
+            {
+              fprintf (stderr, "\n Bank One F%02X Private or Data Call(s) - ", pdflag);
+              for (i = 0; i < 8; i++)
+              {
+                pch[i] = state->cap_plus_csbk_bits[ts][p1_map_pos+i];
+                if (pch[i] == 1)
+                {
+                  p_tg[i] = (bit_pos + 16 <= cap_max_bits)
+                          ? (uint16_t)ConvertBitIntoBytes(&state->cap_plus_csbk_bits[ts][bit_pos], 16)
+                          : 0;
+                  bit_pos += 16;
+                  fprintf (stderr, " LSN %02d: TGT %d;", i+1, p_tg[i]);
+                }
+              }
+            }
+
+            //check for private activity on LSNs 9-16 (directly follows Bank 1 targets)
+            int p2_map_pos = bit_pos;
+            pbank_two = (p2_map_pos + 8 <= cap_max_bits)
+                      ? (uint8_t)ConvertBitIntoBytes(&state->cap_plus_csbk_bits[ts][p2_map_pos], 8)
+                      : 0;
+            bit_pos += 8;
+            if (pbank_two)
+            {
+              fprintf (stderr, "\n Bank Two F%02X Private or Data Call(s) - ", pdflag);
+              for (i = 0; i < 8; i++)
+              {
+                pch[i+8] = state->cap_plus_csbk_bits[ts][p2_map_pos+i];
+                if (pch[i+8] == 1)
+                {
+                  p_tg[i+8] = (bit_pos + 16 <= cap_max_bits)
+                            ? (uint16_t)ConvertBitIntoBytes(&state->cap_plus_csbk_bits[ts][bit_pos], 16)
+                            : 0;
+                  bit_pos += 16;
+                  fprintf (stderr, " LSN %02d: TGT %d;", i+9, p_tg[i+8]);
+                }
+              }
+            }
+          }
+
           fprintf (stderr, "\n  ");
 
-          //additive strings for active channels
-          memset (state->active_channel, 0, sizeof(state->active_channel));
-          sprintf (state->active_channel[0], "Cap+ ");
-          state->last_active_time = time(NULL);
-
-          k = 0;
-          x = 0;
+          uint8_t disp_b1 = bank_one | pbank_one;
+          uint8_t disp_b2 = bank_two | pbank_two;
 
           //NOTE: New start and end positions will allow the status print
           //to contract and expand as needed to prevent this from
@@ -1505,38 +2990,43 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
 
           //start position;
           start = 0;
-          if (bank_one & 0xF0) start = 0;
+          if (disp_b1 & 0xF0) start = 0;
           else if (rest_channel < 5) start = 0;
 
-          else if (bank_one & 0xF) start = 4;
+          else if (disp_b1 & 0xF) start = 4;
           else if (rest_channel > 4 && rest_channel < 9) start = 4;
 
-          else if (bank_two & 0xF0) start = 8;
+          else if (disp_b2 & 0xF0) start = 8;
           else if (rest_channel > 8 && rest_channel < 13) start = 8;
 
-          else if (bank_two & 0xF) start = 12;
+          else if (disp_b2 & 0xF) start = 12;
           else if (rest_channel > 12) start = 12;
 
           //end position;
           end = 16;
-          if (bank_two & 0xF) end = 16;
+          if (disp_b2 & 0xF) end = 16;
           else if (rest_channel > 12) end = 16;
 
-          else if (bank_two & 0xF0) end = 12;
-          else if (rest_channel > 9 && rest_channel < 13) end = 12;
+          else if (disp_b2 & 0xF0) end = 12;
+          else if (rest_channel > 8 && rest_channel < 13) end = 12;
 
-          else if (bank_one & 0xF) end = 8;
+          else if (disp_b1 & 0xF) end = 8;
           else if (rest_channel > 4 && rest_channel < 9) end = 8;
 
-          else if (bank_one & 0xF0) end = 4;
+          else if (disp_b1 & 0xF0) end = 4;
           else if (rest_channel < 5) end = 4;
+
+          for (i = 0; i < 16; i++)
+          {
+            if (ch[i] == 1 && opts->trunk_tune_group_calls == 1)
+              t_tg[i] = g_tg[i];
+            else if (pch[i] == 1 && opts->trunk_tune_private_calls == 1)
+              t_tg[i] = p_tg[i];
+          }
 
           //start parsing info and listing active LSNs
           for (i = start; i < end; i++)
           {
-            //skip an additional k value per bank
-            if (i == 8) k++;
-
             if (start < 1 && i == 4)
               fprintf (stderr, "\n  ");
 
@@ -1549,41 +3039,119 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
             fprintf (stderr, "LSN %02d: ", i+1);
             if (ch[i] == 1) //group voice channels
             {
-
-              tg = (uint16_t)ConvertBitIntoBytes(&state->cap_plus_csbk_bits[ts][(k*8)+32], 8);
+              tg = g_tg[i];
               if (tg != 0) fprintf (stderr, "%5d;  ", tg);
               else fprintf (stderr, "Group;  ");
-              //flag as available for tuning if group calls enabled
-              if (opts->trunk_tune_group_calls == 1) t_tg[i] = tg;
-              if (tg != 0) k++;
-
-              //add active channel to display string
-              sprintf (cap_active, "LSN:%d TG:%d; ", i+1, tg);
-              strcat (state->active_channel[i+1], cap_active);
             }
             else if (pch[i] == 1) //private or data channels
             {
-              tg = (uint16_t)ConvertBitIntoBytes(&state->cap_plus_csbk_bits[ts][(group_tally*8)+(x*16)+56], 16); //don't change this AGAIN!, this is correct!
+              tg = p_tg[i];
               if (tg != 0) fprintf (stderr, "%5d;  ", tg);
               else fprintf (stderr, " P||D;  ");
-              //flag as available for tuning if private calls enabled
-              if (opts->trunk_tune_private_calls == 1) t_tg[i] = tg; //ch[i] = 1;
-              if (tg != 0) x++;
-
-              //add active channel to display string
-
-              //NOTE: Consider only adding this if user toggled or else
-              //lots of short data bursts blink in and out
-              if (1 == 1) //opts->trunk_tune_private_calls
-              {
-                sprintf (cap_active, "LSN:%d PC:%d; ", i+1, tg);
-                strcat (state->active_channel[i+1], cap_active);
-              }
-
             }
             else if (i+1 == rest_channel) fprintf (stderr, " Rest;  ");
             else fprintf (stderr, " Idle;  ");
+          }
 
+          //update active channels in-place with debounce so brief TS0/TS1 skew or short frames don't blink
+          if (!s_cap_active_present)
+          {
+            dmr_active_channel_reset_rows (state);
+            s_cap_active_present = 1;
+          }
+          state->last_active_time = time(NULL);
+
+          struct timespec cap_now_ts = {0, 0};
+          int have_cap_ts = (clock_gettime(CLOCK_MONOTONIC, &cap_now_ts) == 0);
+
+          for (i = 0; i < 16; i++)
+          {
+            int row = i + 1;
+            int show_row = 0;
+
+            if (ch[i] == 1)
+            {
+              s_cap_priv_active[row] = 0;
+              s_cap_priv_tg[row] = 0;
+              s_cap_priv_miss[row] = 0;
+              show_row = 1;
+            }
+            else if (pch[i] == 1)
+            {
+              s_cap_priv_miss[row] = 0;
+              if (!s_cap_priv_active[row] || s_cap_priv_tg[row] != p_tg[i])
+              {
+                s_cap_priv_active[row] = 1;
+                s_cap_priv_tg[row] = p_tg[i];
+                s_cap_priv_start[row] = cap_now_ts;
+              }
+              else if (have_cap_ts)
+              {
+                long elapsed_ms = (cap_now_ts.tv_sec - s_cap_priv_start[row].tv_sec) * 1000L
+                                + (cap_now_ts.tv_nsec - s_cap_priv_start[row].tv_nsec) / 1000000L;
+                if (elapsed_ms >= DMR_CAP_PRIV_MIN_MS)
+                  show_row = 1;
+              }
+              else
+              {
+                show_row = 1;
+              }
+            }
+            else if (s_cap_priv_active[row])
+            {
+              s_cap_priv_miss[row]++;
+              if (s_cap_priv_miss[row] >= 3)
+              {
+                s_cap_priv_active[row] = 0;
+                s_cap_priv_tg[row] = 0;
+                s_cap_priv_miss[row] = 0;
+              }
+            }
+
+            if (show_row)
+            {
+              uint8_t is_group = (ch[i] == 1);
+              uint16_t act_tg = is_group ? g_tg[i] : p_tg[i];
+              const char * alias = NULL;
+              if (act_tg != 0)
+              {
+                for (int g = 0; g < state->group_tally; g++)
+                {
+                  if (state->group_array[g].groupNumber == act_tg &&
+                      state->group_array[g].groupName[0] != '\0')
+                  {
+                    alias = state->group_array[g].groupName;
+                    break;
+                  }
+                }
+              }
+              if (act_tg != 0)
+              {
+                if (alias != NULL)
+                  snprintf (state->active_channel[row], sizeof(state->active_channel[row]),
+                            "Active Ch: LSN %2d %-9s TGT: %u [%.64s]",
+                            row, is_group ? "Group" : "Private", act_tg, alias);
+                else
+                  snprintf (state->active_channel[row], sizeof(state->active_channel[row]),
+                            "Active Ch: LSN %2d %-9s TGT: %u",
+                            row, is_group ? "Group" : "Private", act_tg);
+              }
+              else
+              {
+                snprintf (state->active_channel[row], sizeof(state->active_channel[row]),
+                          "Active Ch: LSN %2d %s", row, is_group ? "Group" : "Priv/Data");
+              }
+              s_cap_active_miss[row] = 0;
+            }
+            else if (state->active_channel[row][0] != '\0')
+            {
+              s_cap_active_miss[row]++;
+              if (s_cap_active_miss[row] >= DMR_CAP_ACTIVE_MISS_LIMIT)
+              {
+                state->active_channel[row][0] = '\0';
+                s_cap_active_miss[row] = 0;
+              }
+            }
           }
 
 
@@ -1591,8 +3159,9 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
           sprintf (state->dmr_branding, "%s", "Motorola");
           sprintf (state->dmr_branding_sub, "%s", "Cap+ ");
 
-          //nullify any previous site_parm data
-          sprintf(state->dmr_site_parms, "%s", "");
+          //nullify any previous non-Cap+ site_parm data
+          if (strncmp(state->dmr_site_parms, "Site ", 5) != 0)
+            sprintf(state->dmr_site_parms, "%s", "");
 
           fprintf (stderr, "%s", KNRM);
 
@@ -1613,34 +3182,43 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
           //when a TG hold is specified but nether slot carries the TG on Hold;
           //CODED: using slow link control for that
 
+          //filter blocked/locked-out talkgroups so they do not count as busy or prevent returning to Rest LSN
+          for (j = 0; j < 16; j++)
+          {
+            if (t_tg[j] == 0) continue;
+
+            char mode[8]; //allow, block, digital, enc, etc
+            sprintf (mode, "%s", "");
+
+            //if we are using allow/whitelist mode, then write 'B' to mode for block
+            //comparison below will look for an 'A' to write to mode if it is allowed
+            if (opts->trunk_use_allow_list == 1) sprintf (mode, "%s", "B");
+
+            for (int i = 0; i < state->group_tally; i++)
+            {
+              if (state->group_array[i].groupNumber == t_tg[j])
+              {
+                fprintf (stderr, " [%s]", state->group_array[i].groupName);
+                strcpy (mode, state->group_array[i].groupMode);
+                break;
+              }
+            }
+
+            //TG hold on DMR Cap+ -- block non-matching target, allow matching target
+            if (state->tg_hold != 0 && state->tg_hold != t_tg[j]) sprintf (mode, "%s", "B");
+            if (state->tg_hold != 0 && state->tg_hold == t_tg[j]) sprintf (mode, "%s", "A");
+
+            if (strcmp(mode, "B") == 0 || strcmp(mode, "DE") == 0)
+              t_tg[j] = 0;
+          }
+
           //don't tune if vc on the current channel
           if ( (time(NULL) - state->last_vc_sync_time > 2) )
           {
-            for (j = start; j < end; j++) //go through the channels stored looking for active ones to tune to
+            for (j = 0; j < 16; j++) //go through the channels stored looking for active ones to tune to
             {
-              char mode[8]; //allow, block, digital, enc, etc
-              sprintf (mode, "%s", "");
-
-              //if we are using allow/whitelist mode, then write 'B' to mode for block
-              //comparison below will look for an 'A' to write to mode if it is allowed
-              if (opts->trunk_use_allow_list == 1) sprintf (mode, "%s", "B");
-
-              for (int i = 0; i < state->group_tally; i++)
-              {
-                if (state->group_array[i].groupNumber == t_tg[j])
-                {
-                  fprintf (stderr, " [%s]", state->group_array[i].groupName);
-                  strcpy (mode, state->group_array[i].groupMode);
-                  break;
-                }
-              }
-
-              //TG hold on DMR Cap+ -- block non-matching target, allow matching target
-              if (state->tg_hold != 0 && state->tg_hold != t_tg[j]) sprintf (mode, "%s", "B");
-              if (state->tg_hold != 0 && state->tg_hold == t_tg[j]) sprintf (mode, "%s", "A");
-
               //without priority, this will tune the first one it finds (if group isn't blocked)
-              if (t_tg[j] != 0 && state->p25_cc_freq != 0 && opts->p25_trunk == 1 && (strcmp(mode, "B") != 0) && (strcmp(mode, "DE") != 0))
+              if (t_tg[j] != 0 && state->p25_cc_freq != 0 && opts->p25_trunk == 1)
               {
                 //debug print for tuning verification
                 // fprintf (stderr, "\n LSN/TG to tune to: %d - %d", j+1, t_tg[j]);
@@ -1667,14 +3245,22 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
                       }
                       //end TG set on tune
                     }
-                    if (GetCurrentFreq(opts->rigctl_sockfd) != state->trunk_chan_map[j+1])
+                    long int cur_freq = trunk_get_current_freq(opts, state);
+                    if (cur_freq != state->trunk_chan_map[j+1])
+                    {
                       dmr_reset_blocks (opts, state); //reset all block gathering since we are tuning away from current frequency
-                    if (opts->setmod_bw != 0 ) SetModulation(opts->rigctl_sockfd, opts->setmod_bw);
-                    SetFreq(opts->rigctl_sockfd, state->trunk_chan_map[j+1]);
+                      if (opts->setmod_bw != 0 ) SetModulation(opts->rigctl_sockfd, opts->setmod_bw);
+                      SetFreq(opts->rigctl_sockfd, state->trunk_chan_map[j+1]);
+                    }
+                    else
+                    {
+                      trunk_update_filter_for_freq(state->trunk_chan_map[j+1]);
+                    }
+                    state->gi[j & 1] = (ch[j] == 1) ? 0 : 1;
                     state->p25_vc_freq[0] = state->p25_vc_freq[1] = state->trunk_chan_map[j+1];
                     opts->p25_is_tuned = 1; //set to 1 to set as currently tuned so we don't keep tuning nonstop
                     state->last_vc_sync_time = time(NULL);
-                    j = 11; //break loop
+                    j = 16; //break loop
                   }
 
                   //rtl
@@ -1706,11 +3292,16 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
                       //debug print for tuning verification
                       // fprintf (stderr, "\n RTL LSN/TG to tune to: %d - %d", j+1, t_tg[j]);
                     }
+                    else
+                    {
+                      trunk_update_filter_for_freq(state->trunk_chan_map[j+1]);
+                    }
                     // else fprintf (stderr, "\n DONT RTL LSN/TG to tune to: %d - %d", j+1, t_tg[j]); //debug
+                    state->gi[j & 1] = (ch[j] == 1) ? 0 : 1;
                     state->p25_vc_freq[0] = state->p25_vc_freq[1] = state->trunk_chan_map[j+1];
                     opts->p25_is_tuned = 1;
                     state->last_vc_sync_time = time(NULL);
-                    j = 11; //break loop
+                    j = 16; //break loop
                     #endif
                   }
 
@@ -1727,7 +3318,10 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
             fprintf (stderr, "%s\n", KYEL);
             fprintf (stderr, " CAP+ Multi Block PDU \n  ");
             fl_bytes = 0;
-            for (i = 0; i < (10+(block_num*7)); i++)
+            int total_bytes = 10 + (block_num * 7);
+            if (total_bytes > cap_max_bits / 8)
+              total_bytes = cap_max_bits / 8;
+            for (i = 0; i < total_bytes; i++)
             {
               fl_bytes = (uint8_t)ConvertBitIntoBytes(&state->cap_plus_csbk_bits[ts][i*8], 8);
               fprintf (stderr, "[%02X]", fl_bytes);
@@ -1740,24 +3334,36 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
 
           //check here to see if we can go to the current rest lsn, if not already on it
           int busy = memcmp (empty, t_tg, sizeof(empty));
+          if (!busy)
+            trunk_set_cap_plus_cur_lsn(rest_channel);
+
+          long int saved_cap_cur_freq = s_cap_cur_freq[ts & 1];
+          s_cap_cur_freq[ts & 1] = 0;
 
           //testing (don't keep setting on quick data call LSN flip flops but same frequency for rest channel, other misc conditions)
           // if (!busy && rest_channel != state->dmr_rest_channel && opts->p25_trunk == 1 && state->p25_cc_freq != state->trunk_chan_map[rest_channel])
-          if (!busy && opts->p25_trunk == 1 && state->p25_cc_freq != state->trunk_chan_map[rest_channel])
+          if (!busy && opts->p25_trunk == 1 && rest_channel > 0 && state->trunk_chan_map[rest_channel] != 0)
           {
-            //assign now, ideally, this should always trigger a positive p_clear when needed
-            // state->dmr_rest_channel = rest_channel;
-
-            //update frequency
-            if (state->trunk_chan_map[rest_channel] != 0)
+            long int cap_cur_freq = (saved_cap_cur_freq != 0) ? saved_cap_cur_freq : trunk_get_current_freq(opts, state);
+            if (cap_cur_freq != 0 && cap_cur_freq != state->trunk_chan_map[rest_channel])
+            {
+              //update frequency
               state->p25_cc_freq = state->trunk_chan_map[rest_channel];
 
-            //Craft a fake CSBK pdu send it to run as a p_clear to go to rest channel if its available (no calls currently)
-            uint8_t dummy[12]; uint8_t* dbits; memset (dummy, 0, sizeof(dummy)); dummy[0] = 46; dummy[1] = 253;
+              //Craft a fake CSBK pdu send it to run as a p_clear to go to rest channel if its available (no calls currently)
+              uint8_t dummy[12]; uint8_t dbits[96]; memset (dummy, 0, sizeof(dummy)); memset (dbits, 0, sizeof(dbits)); dummy[0] = 46; dummy[1] = 253;
               dmr_cspdu (opts, state, dbits, dummy, 1, 0);
+            }
+            else if (state->p25_vc_freq[0] != 0 || opts->p25_is_tuned == 1)
+            {
+              state->p25_vc_freq[0] = state->p25_vc_freq[1] = 0;
+              if ((time(NULL) - state->last_vc_sync_time) > opts->trunk_hangtime &&
+                  state->dmrburstL != 16 && state->dmrburstR != 16)
+                opts->p25_is_tuned = 0;
+            }
           }
 
-        } //if (fl == 1 || fl == 3)
+        } //if (cap_complete)
       } //opcode == 0x3E
 
     } //fid == 0x10
@@ -1784,6 +3390,14 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
         if (nb4 != 0) fprintf (stderr, " %d;", nb4);
         if (nb5 != 0) fprintf (stderr, " %d;", nb5);
         if (nb1 == 0) fprintf (stderr, " None Listed;");
+        state->dmr_t3_syscode = 0;
+        state->dmr_neighbor_count = 0;
+        dmr_add_neighbor (state, nb1);
+        dmr_add_neighbor (state, nb2);
+        dmr_add_neighbor (state, nb3);
+        dmr_add_neighbor (state, nb4);
+        dmr_add_neighbor (state, nb5);
+        state->last_active_time = time(NULL);
         state->dmr_mfid = 0x06;
         sprintf (state->dmr_branding, "%s", "Motorola");
         sprintf(state->dmr_branding_sub, "Con+ ");
@@ -1828,6 +3442,7 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
         sprintf(state->dmr_branding_sub, "Con+ ");
 
         //add active channel string for display
+        dmr_t3_active_clear_if_present (state);
         if (opt == 2)
           sprintf (state->active_channel[tslot], "Active Group Ch: %d TG: %d; ", lcn, grpAddr);
         else if (opt == 3)
@@ -1910,6 +3525,7 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
                 state->is_con_plus = 1; //flag on
                 state->last_vc_sync_time = time(NULL); //bugfix: set sync here so we don't immediately tune back to CC constantly.
                 dmr_reset_blocks (opts, state); //reset all block gathering since we are tuning away
+                state->gi[tslot] = (opt == 3) ? 1 : 0;
               }
 
               //rtl
@@ -1922,6 +3538,7 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
                 state->is_con_plus = 1; //flag on
                 state->last_vc_sync_time = time(NULL); //bugfix: set sync here so we don't immediately tune back to CC constantly.
                 dmr_reset_blocks (opts, state); //reset all block gathering since we are tuning away
+                state->gi[tslot] = (opt == 3) ? 1 : 0;
                 #endif
               }
 
@@ -1953,6 +3570,7 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
         if (opts->trunk_tune_data_calls == 0) goto SKIPCOND;
 
         //add active channel string for display
+        dmr_t3_active_clear_if_present (state);
         sprintf (state->active_channel[tslot], "Active Data Ch: %d TG: %d; ", lcn, dtarget);
         state->last_active_time = time(NULL);
 
@@ -2047,7 +3665,7 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
         fprintf (stderr, " Target: %d;", ttarget);
 
         //Run p_clear to decide whether or not to return to the control channel
-        uint8_t dummy[12]; uint8_t* dbits; memset (dummy, 0, sizeof(dummy)); dummy[0] = 46; dummy[1] = 12;
+        uint8_t dummy[12]; uint8_t dbits[96]; memset (dummy, 0, sizeof(dummy)); memset (dbits, 0, sizeof(dbits)); dummy[0] = 46; dummy[1] = 12;
         dmr_cspdu (opts, state, dbits, dummy, 1, 0);
 
         state->dmr_mfid = 0x06;
@@ -2075,7 +3693,7 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
         int i, j;
 
         //tg and channel info for trunking purposes
-        uint8_t t_tg[6];
+        uint16_t t_tg[24];
         memset (t_tg, 0, sizeof(t_tg));
 
         uint8_t xpt_seq    = (uint8_t)ConvertBitIntoBytes(&cs_pdu_bits[0], 2);  //this replaces the CSBK lb and pf
@@ -2096,7 +3714,8 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
         fprintf (stderr, " Hytera XPT Site Status - Free LCN: %d SN: %d", xpt_free, xpt_seq);
 
         //strings for active channels
-        char xpt_active[20];
+        dmr_t3_active_clear_if_present (state);
+        char xpt_active[32];
         if (xpt_seq == 0) sprintf (state->active_channel[0], "XPT "); //add initial if sequence 0
         else sprintf (state->active_channel[xpt_seq], "%s", ""); //blank current sequence to re-write to
         state->last_active_time = time(NULL);
@@ -2126,7 +3745,7 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
             //if Priv/Unk occurs, add t_tg value to it for tuning purposes
             if (xpt_ch[i] == 2)
             {
-              if (opts->trunk_tune_private_calls == 1) t_tg[i] = 1;
+              if (opts->trunk_tune_private_calls == 1) t_tg[i+xpt_bank] = 1;
             }
 
             //could cause erroneous tuning since we don't yet know what the unk value really is (never observed)
@@ -2145,11 +3764,11 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
           //concantenate string to active channels for ncurses display
           if (tg != 0)
           {
-            if (xpt_ch[i] == 3) sprintf (xpt_active, "LSN:%d TG:%d; ", i+xpt_bank+1, tg);
-            if (xpt_ch[i] == 2) sprintf (xpt_active, "LSN:%d PC:%d; ", i+xpt_bank+1, tg);
+            if (xpt_ch[i] == 3) sprintf (xpt_active, "LSN: %d TG: %d; ", i+xpt_bank+1, tg);
+            if (xpt_ch[i] == 2) sprintf (xpt_active, "LSN: %d PC: %d; ", i+xpt_bank+1, tg);
             //last two are unknown status but have an associated target value
-            if (xpt_ch[i] == 1) sprintf (xpt_active, "LSN:%d UK:%d; ", i+xpt_bank+1, tg);
-            if (xpt_ch[i] == 0) sprintf (xpt_active, "LSN:%d UK:%d; ", i+xpt_bank+1, tg);
+            if (xpt_ch[i] == 1) sprintf (xpt_active, "LSN: %d UK: %d; ", i+xpt_bank+1, tg);
+            if (xpt_ch[i] == 0) sprintf (xpt_active, "LSN: %d UK: %d; ", i+xpt_bank+1, tg);
             strcat (state->active_channel[xpt_seq], xpt_active); //add string to active channel seq
           }
 
@@ -2164,11 +3783,12 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
         //if using rigctl we can set an unknown or updated cc frequency
         if (opts->use_rigctl == 1 )
         {
-          ccfreq = GetCurrentFreq (opts->rigctl_sockfd);
+          ccfreq = trunk_get_current_freq (opts, state);
           if (ccfreq != 0)
           {
-            state->p25_cc_freq = ccfreq;
-            opts->p25_is_tuned = 1;
+            trunk_set_cc_freq_if_valid (opts, state, ccfreq);
+            if (opts->p25_trunk == 1)
+              opts->p25_is_tuned = 1;
           }
         }
 
@@ -2178,8 +3798,9 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
           ccfreq = (long int)opts->rtlsdr_center_freq;
           if (ccfreq != 0)
           {
-            state->p25_cc_freq = ccfreq;
-            opts->p25_is_tuned = 1;
+            trunk_set_cc_freq_if_valid (opts, state, ccfreq);
+            if (opts->p25_trunk == 1)
+              opts->p25_is_tuned = 1;
           }
 
         }
@@ -2261,13 +3882,21 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
 
                   //debug
                   // fprintf (stderr, " - Freq: %ld", state->trunk_chan_map[j+xpt_bank+1]);
-                  if (GetCurrentFreq(opts->rigctl_sockfd) != state->trunk_chan_map[j+xpt_bank+1])
+                  long int cur_freq = trunk_get_current_freq(opts, state);
+                  if (cur_freq != state->trunk_chan_map[j+xpt_bank+1])
+                  {
                     dmr_reset_blocks (opts, state); //reset all block gathering since we are tuning away from current frequency
-
-                  if (opts->setmod_bw != 0 ) SetModulation(opts->rigctl_sockfd, opts->setmod_bw);
-                  SetFreq(opts->rigctl_sockfd, state->trunk_chan_map[j+xpt_bank+1]);
+                    if (opts->setmod_bw != 0 ) SetModulation(opts->rigctl_sockfd, opts->setmod_bw);
+                    SetFreq(opts->rigctl_sockfd, state->trunk_chan_map[j+xpt_bank+1]);
+                  }
+                  else
+                  {
+                    trunk_update_filter_for_freq(state->trunk_chan_map[j+xpt_bank+1]);
+                  }
+                  state->gi[j & 1] = 0;
                   state->p25_vc_freq[0] = state->p25_vc_freq[1] = state->trunk_chan_map[j+xpt_bank+1];
                   opts->p25_is_tuned = 1; //set to 1 to set as currently tuned so we don't keep tuning nonstop
+                  state->last_vc_sync_time = time(NULL);
                   j = 11; //break loop
                 }
 
@@ -2301,9 +3930,15 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
                     //debug print for tuning verification
                     fprintf (stderr, " - Tune to Freq: %ld", state->trunk_chan_map[j+xpt_bank+1]);
                   }
-                  else fprintf (stderr, " - Dont Tune Freq: %ld", state->trunk_chan_map[j+xpt_bank+1]);
+                  else
+                  {
+                    trunk_update_filter_for_freq(state->trunk_chan_map[j+xpt_bank+1]);
+                    fprintf (stderr, " - Dont Tune Freq: %ld", state->trunk_chan_map[j+xpt_bank+1]);
+                  }
+                  state->gi[j & 1] = 0;
                   state->p25_vc_freq[0] = state->p25_vc_freq[1] = state->trunk_chan_map[j+xpt_bank+1];
                   opts->p25_is_tuned = 1;
+                  state->last_vc_sync_time = time(NULL);
                   j = 11; //break loop
                   #endif
                 }
@@ -2353,6 +3988,9 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
           xpt_site_u2[i] = (uint8_t)ConvertBitIntoBytes(&cs_pdu_bits[28+(i*16)], 4);
         }
 
+        if (xpt_sn == 0 || state->dmr_t3_syscode != 0)
+          state->dmr_neighbor_count = 0;
+        state->dmr_t3_syscode = 0;
         fprintf (stderr, " Hytera XPT CSBK 0x0B - SN: %d", xpt_sn);
         fprintf (stderr, "\n");
         fprintf (stderr, " XPT Adjacent ");
@@ -2362,8 +4000,10 @@ void dmr_cspdu (dsd_opts * opts, dsd_state * state, uint8_t cs_pdu_bits[], uint8
           {
             fprintf (stderr, "Site:%d Free:%d; ", xpt_site_id[i], xpt_site_rp[i]);
             // fprintf (stderr, "RS1: %d RS2: %d - ", xpt_site_u1[i], xpt_site_u2[i]); //debug
+            dmr_add_neighbor (state, xpt_site_id[i]);
           }
         }
+        state->last_active_time = time(NULL);
         sprintf (state->dmr_branding_sub, "XPT ");
 
       } //end 0x0B
@@ -2438,7 +4078,6 @@ void dmr_gateway_identifier (uint32_t source, uint32_t target)
 void dmr_decode_syscode(dsd_opts * opts, dsd_state * state, uint8_t * cs_pdu_bits, int csbk_fid, int type)
 {
   //TODO: Probably return specific elements of just the aloha to its own area, and just do the syscode here
-  int i;
   //copy and paste code into here, use type to determine whether or not to set current site info or not
   uint8_t reserved = cs_pdu_bits[16];
   uint8_t tsccas = cs_pdu_bits[17];
@@ -2454,92 +4093,65 @@ void dmr_decode_syscode(dsd_opts * opts, dsd_state * state, uint8_t * cs_pdu_bit
   UNUSED5(reserved, tsccas, sync, offset, active);
   UNUSED3(sf, nrandwait, backoff);
 
-  //bparms1
-  uint8_t bpbits1[14]; for (i = 0; i < 14; i++) bpbits1[i] = cs_pdu_bits[21+i];
+  //raw syscode (C_ALOHA uses bits 40..53; C_BCAST Adj/VoteNow uses bparms1 at bits 21..34 and local site at 40..53)
+  uint16_t local_syscode = (uint16_t)ConvertBitIntoBytes(&cs_pdu_bits[40], 14);
+  uint16_t syscode = (type == 0) ? local_syscode
+                                 : (uint16_t)ConvertBitIntoBytes(&cs_pdu_bits[21], 14);
 
-  //if not C_ALOHA_SYS_PARMS, overwrite syscode with bparms1 (too lazy method)
-  if (type != 0)
+  if (type == 0 || (type == 1 && local_syscode != 0))
   {
-    for (i = 0; i < 14; i++)
-      cs_pdu_bits[40+i] = bpbits1[i];
+    if (state->dmr_t3_syscode != local_syscode)
+    {
+      state->dmr_is_ras = 0;
+      state->dmr_branding[0] = 0;
+      state->dmr_neighbor_count = 0;
+      if (csbk_fid == 0 || csbk_fid >= 253)
+        state->dmr_mfid = -1;
+      s_capmax_cc_seen = 0;
+      s_capmax_status_slot = -1;
+      s_capmax_slot_aloha_cnt = 0;
+      s_capmax_non_status_csbks = 0;
+    }
+    state->dmr_t3_syscode = local_syscode;
+    state->dmr_rest_channel = -1;
+    if (state->dmr_branding_sub[0] != 0)
+    {
+      state->dmr_branding[0] = 0;
+      state->dmr_branding_sub[0] = 0;
+      if (csbk_fid == 0 || csbk_fid >= 253)
+        state->dmr_mfid = -1;
+    }
   }
 
-  //raw syscode
-  uint16_t syscode = (uint16_t)ConvertBitIntoBytes(&cs_pdu_bits[40], 14);
-
-  if (type == 0)
-    state->dmr_t3_syscode = syscode;
-
-  uint8_t model = (uint8_t)ConvertBitIntoBytes(&cs_pdu_bits[40], 2);
   uint16_t net = 0;
   uint16_t site = 0;
 
-  //DMR Location Area - DMRLA
-  uint16_t sub_mask = 0x1;
-  //tiny n 1-3; small 1-5; large 1-8; huge 1-10
-  uint16_t n = 1; //The minimum value of DMRLA is normally ≥ 1, 0 is reserved
-
-
+  //DMR Location Area - DMRLA: tiny n 1-3; small 1-5; large 1-8; huge 1-10
+  uint16_t n = 1;
   char model_str[8];
   char par_str[8]; //category A, B, AB, or reserved
 
   sprintf (model_str, "%s", " ");
   sprintf (par_str, "%s", "Res");
 
-  if (model == 0) //Tiny
-  {
-    net  = (uint16_t)ConvertBitIntoBytes(&cs_pdu_bits[42], 9);
-    site = (uint16_t)ConvertBitIntoBytes(&cs_pdu_bits[51], 3);
-    sprintf (model_str, "%s", "Tiny");
-    n = 3;
-  }
-  else if (model == 1) //Small
-  {
-    net  = (uint16_t)ConvertBitIntoBytes(&cs_pdu_bits[42], 7);
-    site = (uint16_t)ConvertBitIntoBytes(&cs_pdu_bits[49], 5);
-    sprintf (model_str, "%s", "Small");
-    n = 5;
-  }
-  else if (model == 2) //Large
-  {
-    net  = (uint16_t)ConvertBitIntoBytes(&cs_pdu_bits[42], 4);
-    site = (uint16_t)ConvertBitIntoBytes(&cs_pdu_bits[46], 8);
-    sprintf (model_str, "%s", "Large");
-    n = 8;
-  }
-  else if (model == 3) //Huge
-  {
-    net  = (uint16_t)ConvertBitIntoBytes(&cs_pdu_bits[42], 2);
-    site = (uint16_t)ConvertBitIntoBytes(&cs_pdu_bits[44], 10);
-    sprintf (model_str, "%s", "Huge");
-    n = 10;
-  }
+  dmr_parse_t3_syscode (syscode, &net, &site, &n, model_str, sizeof(model_str));
+  if (type == 1 && local_syscode != 0)
+    dmr_record_t3_syscode (state, local_syscode, 0);
+  dmr_record_t3_syscode (state, syscode, (type != 0));
 
   //honestly can't say that this is accurate, just a guess
   uint8_t is_capmax = 0; //capmax(mot) flag
   if (csbk_fid == 0x10)
   {
-    n = 0;
     is_capmax = 1;
-    opts->dmr_dmrla_is_set = 1;
-    opts->dmr_dmrla_n = 0;
-    sprintf (state->dmr_branding, "%s", "Motorola");
+    if (type == 0)
+      sprintf (state->dmr_branding, "%s", "Motorola");
     // sprintf (state->dmr_branding_sub, "%s", "CapMax ");
   }
 
-  if (opts->dmr_dmrla_is_set == 1) n = opts->dmr_dmrla_n;
+  n = dmr_effective_t3_n (opts, state, syscode, n, is_capmax);
 
-  if (n == 0) sub_mask = 0x0;
-  if (n == 1) sub_mask = 0x1;
-  if (n == 2) sub_mask = 0x3;
-  if (n == 3) sub_mask = 0x7;
-  if (n == 4) sub_mask = 0xF;
-  if (n == 5) sub_mask = 0x1F;
-  if (n == 6) sub_mask = 0x3F;
-  if (n == 7) sub_mask = 0x7F;
-  if (n == 8) sub_mask = 0xFF;
-  if (n == 9) sub_mask = 0x1FF;
-  if (n == 10) sub_mask = 0x3FF;
+  uint16_t sub_mask = (n == 0) ? 0 : (uint16_t)((1U << n) - 1);
 
   uint8_t par = (uint8_t)ConvertBitIntoBytes(&cs_pdu_bits[54], 2);
   if (par == 1) sprintf (par_str, "%s", "A");
@@ -2576,19 +4188,18 @@ void dmr_decode_syscode(dsd_opts * opts, dsd_state * state, uint8_t * cs_pdu_bit
     }
 
     //add string for ncurses terminal display
-    // if (n != 0) sprintf (state->dmr_site_parms, "TIII - %s %d-%d.%d; SYS: %04X; ", model_str, net+1, (site>>n)+1, (site & sub_mask)+1, syscode );
-    // else sprintf (state->dmr_site_parms, "TIII - %s %d-%d; SYS: %04X; ", model_str, net, site, syscode);
-    if (n != 0) sprintf (state->dmr_site_parms, "TIII %s:%d-%d.%d;%04X; ", model_str, net+1, (site>>n)+1, (site & sub_mask)+1, syscode );
-    else sprintf (state->dmr_site_parms, "TIII %s:%d-%d;%04X; ", model_str, net, site, syscode);
+    dmr_refresh_t3_site_parms (opts, state);
   }
 
   if (type == 1)
   {
+    dmr_add_neighbor (state, syscode);
     //NOTE: I just wrote bparms1 into the area where syscode is when it is an adj_site (or votenow site)
     if (n != 0) fprintf (stderr, " %s; Net ID: %d; Site ID: %d.%d;", model_str, net+1, (site>>n)+1, (site & sub_mask)+1); //par_string available here?
     else fprintf (stderr, " %s; Net ID: %d; Site ID: %d;", model_str, net, site);
     fprintf (stderr, " SYS: %04X;", syscode); //#192
     // if (is_capmax) fprintf (stderr, "Capacity Max ");
+    dmr_refresh_t3_site_parms (opts, state);
   }
 
 }
